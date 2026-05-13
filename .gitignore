@@ -68,3 +68,10 @@ server.log
 
 # Prisma (we use Turso/drizzle now)
 /prisma/
+
+# Not part of xG-Vantage app
+/skills/
+/examples/
+/mini-services/
+/.zscripts/
+/worklog.md

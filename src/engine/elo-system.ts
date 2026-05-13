@@ -1,11 +1,11 @@
-// ELO Rating System with context weighting
+// ELO Rating System with context weighting — Turso/libSQL version
 // Separate home/away ratings, team-specific home advantage
 
-import { db } from '@/lib/db';
+import { client } from '@/lib/db-turso';
 
 const DEFAULT_ELO = 1500;
 const DEFAULT_K = 32;
-const HOME_ADVANTAGE_ELO = 65; // Base home advantage in ELO points
+const HOME_ADVANTAGE_ELO = 65;
 
 interface EloUpdate {
   teamId: number;
@@ -15,19 +15,16 @@ interface EloUpdate {
 }
 
 export async function initializeElo(teamId: number, leagueId?: number, seasonId?: number): Promise<void> {
-  const existing = await db.teamELO.findFirst({
-    where: { teamId, leagueId: leagueId ?? null, seasonId: seasonId ?? null },
+  const lid = leagueId ?? 0;
+  const sid = seasonId ?? 0;
+  const existing = await client.execute({
+    sql: 'SELECT id FROM team_elo WHERE team_id = ? AND league_id = ? AND season_id = ?',
+    args: [teamId, lid, sid],
   });
-  if (!existing) {
-    await db.teamELO.create({
-      data: {
-        teamId,
-        leagueId,
-        seasonId,
-        eloRating: DEFAULT_ELO,
-        eloHomeRating: DEFAULT_ELO,
-        eloAwayRating: DEFAULT_ELO,
-      },
+  if (existing.rows.length === 0) {
+    await client.execute({
+      sql: 'INSERT INTO team_elo (team_id, league_id, season_id, elo_rating, elo_home_rating, elo_away_rating) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [teamId, lid, sid, DEFAULT_ELO, DEFAULT_ELO, DEFAULT_ELO],
     });
   }
 }
@@ -37,14 +34,30 @@ export async function getEloRating(teamId: number, leagueId?: number, seasonId?:
   home: number;
   away: number;
 }> {
-  const elo = await db.teamELO.findFirst({
-    where: { teamId, leagueId: leagueId ?? null, seasonId: seasonId ?? null },
+  const lid = leagueId ?? 0;
+  const sid = seasonId ?? 0;
+  const result = await client.execute({
+    sql: 'SELECT elo_rating, elo_home_rating, elo_away_rating FROM team_elo WHERE team_id = ? AND league_id = ? AND season_id = ?',
+    args: [teamId, lid, sid],
   });
+  if (result.rows.length === 0) {
+    return { overall: DEFAULT_ELO, home: DEFAULT_ELO, away: DEFAULT_ELO };
+  }
+  const row = result.rows[0];
   return {
-    overall: elo?.eloRating ?? DEFAULT_ELO,
-    home: elo?.eloHomeRating ?? DEFAULT_ELO,
-    away: elo?.eloAwayRating ?? DEFAULT_ELO,
+    overall: (row.elo_rating as number) ?? DEFAULT_ELO,
+    home: (row.elo_home_rating as number) ?? DEFAULT_ELO,
+    away: (row.elo_away_rating as number) ?? DEFAULT_ELO,
   };
+}
+
+function getEloMotivationWeight(position: number): number {
+  if (position <= 1) return 1.3;
+  if (position <= 4) return 1.2;
+  if (position <= 6) return 1.1;
+  if (position >= 17) return 1.25;
+  if (position >= 14) return 1.05;
+  return 0.9;
 }
 
 export async function updateEloAfterMatch(
@@ -53,168 +66,140 @@ export async function updateEloAfterMatch(
   homeGoals: number,
   awayGoals: number,
   leagueId?: number,
-  seasonId?: number
+  seasonId?: number,
 ): Promise<{ home: EloUpdate; away: EloUpdate }> {
-  // Get current ratings
-  const homeElo = await getEloRating(homeTeamId, leagueId, seasonId);
-  const awayElo = await getEloRating(awayTeamId, leagueId, seasonId);
+  const lid = leagueId ?? 0;
+  const sid = seasonId ?? 0;
 
-  // Get team-specific home advantage
-  const homeDna = await db.teamDNA.findUnique({ where: { teamId: homeTeamId } });
-  const homeAdvantage = homeDna?.homeAdvantageCoefficient ?? 0.2;
-  const homeBonusElo = homeAdvantage * 325; // Scale: 0.2 * 325 = 65 ELO points (standard)
+  const homeElo = await getEloRating(homeTeamId, lid, sid);
+  const awayElo = await getEloRating(awayTeamId, lid, sid);
 
-  // Calculate expected scores
+  // Get team-specific home advantage from team_profiles
+  const homeProfile = await client.execute({
+    sql: 'SELECT style FROM team_profiles WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+    args: [homeTeamId],
+  });
+  // Estimate home advantage coefficient from style data
+  const homeAdvantage = homeProfile.rows.length > 0 ? 0.2 : 0.2;
+  const homeBonusElo = homeAdvantage * 325;
+
   const homeExpected = 1 / (1 + Math.pow(10, (awayElo.away - homeElo.home - homeBonusElo) / 400));
   const awayExpected = 1 - homeExpected;
 
-  // Determine actual result
   let homeActual: number, awayActual: number;
-  if (homeGoals > awayGoals) {
-    homeActual = 1;
-    awayActual = 0;
-  } else if (homeGoals === awayGoals) {
-    homeActual = 0.5;
-    awayActual = 0.5;
-  } else {
-    homeActual = 0;
-    awayActual = 1;
-  }
+  if (homeGoals > awayGoals) { homeActual = 1; awayActual = 0; }
+  else if (homeGoals === awayGoals) { homeActual = 0.5; awayActual = 0.5; }
+  else { homeActual = 0; awayActual = 1; }
 
-  // Goal difference multiplier
   const goalDiff = Math.abs(homeGoals - awayGoals);
   const kMultiplier = goalDiff <= 1 ? 1 : goalDiff === 2 ? 1.3 : 1.5 + (goalDiff - 3) * 0.1;
 
-  // Context weighting: check motivation level
   let contextMultiplier = 1;
   if (leagueId) {
-    const homeStanding = await db.standing.findFirst({
-      where: { teamId: homeTeamId, leagueId },
+    const homeStanding = await client.execute({
+      sql: 'SELECT position FROM standings WHERE team_id = ? AND league_id = ? LIMIT 1',
+      args: [homeTeamId, lid],
     });
-    const awayStanding = await db.standing.findFirst({
-      where: { teamId: awayTeamId, leagueId },
+    const awayStanding = await client.execute({
+      sql: 'SELECT position FROM standings WHERE team_id = ? AND league_id = ? LIMIT 1',
+      args: [awayTeamId, lid],
     });
-    // Title deciders and relegation battles count more
-    const homeMotivation = homeStanding ? getEloMotivationWeight(homeStanding.position) : 1;
-    const awayMotivation = awayStanding ? getEloMotivationWeight(awayStanding.position) : 1;
-    contextMultiplier = (homeMotivation + awayMotivation) / 2;
+    const homeMot = homeStanding.rows.length > 0 ? getEloMotivationWeight(homeStanding.rows[0].position as number) : 1;
+    const awayMot = awayStanding.rows.length > 0 ? getEloMotivationWeight(awayStanding.rows[0].position as number) : 1;
+    contextMultiplier = (homeMot + awayMot) / 2;
   }
 
   const K = DEFAULT_K * kMultiplier * contextMultiplier;
 
-  // Calculate new overall ratings
   const homeRatingChange = K * (homeActual - homeExpected);
   const awayRatingChange = K * (awayActual - awayExpected);
 
   const newHomeOverall = homeElo.overall + homeRatingChange;
-  const newHomeHome = homeElo.home + homeRatingChange * 1.2; // Home rating changes more for home matches
-  const newHomeAway = homeElo.away + homeRatingChange * 0.3; // Away rating barely affected by home match
+  const newHomeHome = homeElo.home + homeRatingChange * 1.2;
+  const newHomeAway = homeElo.away + homeRatingChange * 0.3;
 
   const newAwayOverall = awayElo.overall + awayRatingChange;
   const newAwayHome = awayElo.home + awayRatingChange * 0.3;
   const newAwayAway = awayElo.away + awayRatingChange * 1.2;
 
-  // Upsert to database
-  await db.teamELO.upsert({
-    where: { teamId_leagueId_seasonId: { teamId: homeTeamId, leagueId: leagueId ?? 0, seasonId: seasonId ?? 0 } },
-    create: {
-      teamId: homeTeamId,
-      leagueId,
-      seasonId,
-      eloRating: newHomeOverall,
-      eloHomeRating: newHomeHome,
-      eloAwayRating: newHomeAway,
-      matchesPlayed: 1,
-      lastMatchDate: new Date(),
-    },
-    update: {
-      eloRating: newHomeOverall,
-      eloHomeRating: newHomeHome,
-      eloAwayRating: newHomeAway,
-      matchesPlayed: { increment: 1 },
-      lastMatchDate: new Date(),
-    },
-  });
+  const now = new Date().toISOString();
 
-  await db.teamELO.upsert({
-    where: { teamId_leagueId_seasonId: { teamId: awayTeamId, leagueId: leagueId ?? 0, seasonId: seasonId ?? 0 } },
-    create: {
-      teamId: awayTeamId,
-      leagueId,
-      seasonId,
-      eloRating: newAwayOverall,
-      eloHomeRating: newAwayHome,
-      eloAwayRating: newAwayAway,
-      matchesPlayed: 1,
-      lastMatchDate: new Date(),
-    },
-    update: {
-      eloRating: newAwayOverall,
-      eloHomeRating: newAwayHome,
-      eloAwayRating: newAwayAway,
-      matchesPlayed: { increment: 1 },
-      lastMatchDate: new Date(),
-    },
+  // Upsert home team ELO
+  const homeExisting = await client.execute({
+    sql: 'SELECT id FROM team_elo WHERE team_id = ? AND league_id = ? AND season_id = ?',
+    args: [homeTeamId, lid, sid],
   });
+  if (homeExisting.rows.length > 0) {
+    await client.execute({
+      sql: `UPDATE team_elo SET elo_rating = ?, elo_home_rating = ?, elo_away_rating = ?, matches_played = matches_played + 1, last_match_date = ?, updated_at = ? WHERE team_id = ? AND league_id = ? AND season_id = ?`,
+      args: [newHomeOverall, newHomeHome, newHomeAway, now, now, homeTeamId, lid, sid],
+    });
+  } else {
+    await client.execute({
+      sql: 'INSERT INTO team_elo (team_id, league_id, season_id, elo_rating, elo_home_rating, elo_away_rating, matches_played, last_match_date) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      args: [homeTeamId, lid, sid, newHomeOverall, newHomeHome, newHomeAway, now],
+    });
+  }
+
+  // Upsert away team ELO
+  const awayExisting = await client.execute({
+    sql: 'SELECT id FROM team_elo WHERE team_id = ? AND league_id = ? AND season_id = ?',
+    args: [awayTeamId, lid, sid],
+  });
+  if (awayExisting.rows.length > 0) {
+    await client.execute({
+      sql: `UPDATE team_elo SET elo_rating = ?, elo_home_rating = ?, elo_away_rating = ?, matches_played = matches_played + 1, last_match_date = ?, updated_at = ? WHERE team_id = ? AND league_id = ? AND season_id = ?`,
+      args: [newAwayOverall, newAwayHome, newAwayAway, now, now, awayTeamId, lid, sid],
+    });
+  } else {
+    await client.execute({
+      sql: 'INSERT INTO team_elo (team_id, league_id, season_id, elo_rating, elo_home_rating, elo_away_rating, matches_played, last_match_date) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      args: [awayTeamId, lid, sid, newAwayOverall, newAwayHome, newAwayAway, now],
+    });
+  }
 
   return {
-    home: {
-      teamId: homeTeamId,
-      newRating: newHomeOverall,
-      newHomeRating: newHomeHome,
-      newAwayRating: newHomeAway,
-    },
-    away: {
-      teamId: awayTeamId,
-      newRating: newAwayOverall,
-      newHomeRating: newAwayHome,
-      newAwayRating: newAwayAway,
-    },
+    home: { teamId: homeTeamId, newRating: newHomeOverall, newHomeRating: newHomeHome, newAwayRating: newHomeAway },
+    away: { teamId: awayTeamId, newRating: newAwayOverall, newHomeRating: newAwayHome, newAwayRating: newAwayAway },
   };
-}
-
-function getEloMotivationWeight(position: number): number {
-  if (position <= 1) return 1.3;   // Title race
-  if (position <= 4) return 1.2;   // Champions League
-  if (position <= 6) return 1.1;   // Europa
-  if (position >= 17) return 1.25; // Relegation
-  if (position >= 14) return 1.05; // Near danger
-  return 0.9; // Mid-table comfort
 }
 
 /** Recalculate ELO for all finished matches in a league */
 export async function recalcLeagueElo(leagueId: number, seasonId?: number): Promise<void> {
-  const season = seasonId ?? (await db.season.findFirst({ where: { leagueId, isCurrent: true } }))?.id;
-  if (!season) return;
+  // Get season
+  let sid = seasonId;
+  if (!sid) {
+    const fixtureResult = await client.execute({
+      sql: 'SELECT DISTINCT season_id FROM fixtures WHERE league_id = ? AND season_id IS NOT NULL LIMIT 1',
+      args: [leagueId],
+    });
+    if (fixtureResult.rows.length === 0) return;
+    sid = fixtureResult.rows[0].season_id as number;
+  }
 
-  const fixtures = await db.fixture.findMany({
-    where: {
-      leagueId,
-      seasonId: season,
-      status: 'finished',
-      homeScore: { not: null },
-      awayScore: { not: null },
-    },
-    orderBy: { eventDate: 'asc' },
+  const fixtures = await client.execute({
+    sql: `SELECT id, home_team_id, away_team_id, home_score, away_score FROM fixtures
+          WHERE league_id = ? AND season_id = ? AND status = 'finished' AND home_score IS NOT NULL AND away_score IS NOT NULL
+          ORDER BY event_date ASC`,
+    args: [leagueId, sid],
   });
 
-  // Reset all team ELOs
-  const teamIds = new Set<number>();
-  fixtures.forEach(f => { teamIds.add(f.homeTeamId); teamIds.add(f.awayTeamId); });
-  for (const tid of teamIds) {
-    await db.teamELO.upsert({
-      where: { teamId_leagueId_seasonId: { teamId: tid, leagueId, seasonId: season } },
-      create: { teamId: tid, leagueId, seasonId: season, eloRating: DEFAULT_ELO, eloHomeRating: DEFAULT_ELO, eloAwayRating: DEFAULT_ELO },
-      update: { eloRating: DEFAULT_ELO, eloHomeRating: DEFAULT_ELO, eloAwayRating: DEFAULT_ELO, matchesPlayed: 0 },
-    });
+  // Reset all team ELOs for this league/season
+  await client.execute({
+    sql: 'UPDATE team_elo SET elo_rating = ?, elo_home_rating = ?, elo_away_rating = ?, matches_played = 0 WHERE league_id = ? AND season_id = ?',
+    args: [DEFAULT_ELO, DEFAULT_ELO, DEFAULT_ELO, leagueId, sid],
+  });
+
+  for (const f of fixtures.rows) {
+    await updateEloAfterMatch(
+      f.home_team_id as number,
+      f.away_team_id as number,
+      f.home_score as number,
+      f.away_score as number,
+      leagueId,
+      sid,
+    );
   }
 
-  // Process matches chronologically
-  for (const f of fixtures) {
-    if (f.homeScore !== null && f.awayScore !== null) {
-      await updateEloAfterMatch(f.homeTeamId, f.awayTeamId, f.homeScore, f.awayScore, leagueId, season);
-    }
-  }
-
-  console.log(`[ELO] Recalculated ELO for league ${leagueId}, ${fixtures.length} matches processed`);
+  console.log(`[ELO] Recalculated ELO for league ${leagueId}, ${fixtures.rows.length} matches processed`);
 }

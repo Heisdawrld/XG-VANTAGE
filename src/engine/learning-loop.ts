@@ -1,182 +1,146 @@
-// Self-Learning Loop — Validates predictions and adjusts model weights
+// Self-Learning Loop — Turso/libSQL version
+// Validates predictions and adjusts model weights
 
-import { db } from '@/lib/db';
+import { client } from '@/lib/db-turso';
 
 export async function validatePrediction(fixtureId: number): Promise<{
   resultCorrect: boolean;
   homeGoalsError: number;
   awayGoalsError: number;
 } | null> {
-  const fixture = await db.fixture.findUnique({
-    where: { id: fixtureId },
-    include: { prediction: true },
+  const fixtureResult = await client.execute({
+    sql: 'SELECT * FROM fixtures WHERE id = ?',
+    args: [fixtureId],
+  });
+  if (fixtureResult.rows.length === 0) return null;
+
+  const fixture = fixtureResult.rows[0];
+  if (fixture.status !== 'finished' || fixture.home_score == null || fixture.away_score == null) return null;
+
+  const predResult = await client.execute({
+    sql: 'SELECT * FROM predictions WHERE fixture_id = ?',
+    args: [fixtureId],
+  });
+  if (predResult.rows.length === 0) return null;
+
+  const pred = predResult.rows[0];
+  const homeScore = fixture.home_score as number;
+  const awayScore = fixture.away_score as number;
+
+  // Determine actual result
+  const actualResult = homeScore > awayScore ? 'H' : homeScore === awayScore ? 'D' : 'A';
+
+  // Check if the pick was correct
+  const pickType = pred.pick_type as string;
+  const totalGoals = homeScore + awayScore;
+  let pickWon = false;
+  switch (pickType) {
+    case 'home_win': pickWon = homeScore > awayScore; break;
+    case 'away_win': pickWon = awayScore > homeScore; break;
+    case 'draw': pickWon = homeScore === awayScore; break;
+    case 'over_25': pickWon = totalGoals > 2.5; break;
+    case 'under_25': pickWon = totalGoals < 2.5; break;
+    case 'btts_yes': pickWon = homeScore > 0 && awayScore > 0; break;
+    case 'btts_no': pickWon = !(homeScore > 0 && awayScore > 0); break;
+  }
+
+  // Update prediction result
+  await client.execute({
+    sql: `UPDATE predictions SET result = ?, settled_at = datetime('now') WHERE fixture_id = ?`,
+    args: [pickWon ? 'won' : 'lost', fixtureId],
   });
 
-  if (!fixture || !fixture.prediction || fixture.status !== 'finished') return null;
-  if (fixture.homeScore === null || fixture.awayScore === null) return null;
+  const homeGoalsError = Math.abs((pred.home_xg as number) - homeScore);
+  const awayGoalsError = Math.abs((pred.away_xg as number) - awayScore);
 
-  const pred = fixture.prediction;
-  const actualResult = fixture.homeScore > fixture.awayScore ? 'H' : fixture.homeScore === fixture.awayScore ? 'D' : 'A';
-  const resultCorrect = pred.predictedResult === actualResult;
-
-  const homeGoalsError = Math.abs(pred.expectedHomeGoals - fixture.homeScore);
-  const awayGoalsError = Math.abs(pred.expectedAwayGoals - fixture.awayScore);
-
-  const actualOver25 = (fixture.homeScore + fixture.awayScore) > 2.5;
-  const actualBtts = fixture.homeScore > 0 && fixture.awayScore > 0;
-
-  // Calibration error: how far was our probability from reality
-  const probCalibrationError = actualResult === 'H'
-    ? Math.abs(1 - pred.probHomeWin)
-    : actualResult === 'D'
-    ? Math.abs(1 - pred.probDraw)
-    : Math.abs(1 - pred.probAwayWin);
-
-  // Store outcome
-  await db.predictionOutcome.upsert({
-    where: { predictionId: pred.id },
-    create: {
-      predictionId: pred.id,
-      fixtureId,
-      actualHomeScore: fixture.homeScore,
-      actualAwayScore: fixture.awayScore,
-      actualResult,
-      actualOver25,
-      actualBtts,
-      resultCorrect,
-      scoreExact: `${fixture.homeScore}-${fixture.awayScore}` === pred.mostLikelyScore,
-      homeGoalsError,
-      awayGoalsError,
-      probCalibrationError,
-    },
-    update: {
-      actualHomeScore: fixture.homeScore,
-      actualAwayScore: fixture.awayScore,
-      actualResult,
-      actualOver25,
-      actualBtts,
-      resultCorrect,
-      homeGoalsError,
-      awayGoalsError,
-      probCalibrationError,
-    },
-  });
-
-  console.log(`[Learning] Fixture ${fixtureId}: Predicted ${pred.predictedResult}, Actual ${actualResult}, Correct: ${resultCorrect}`);
-  return { resultCorrect, homeGoalsError, awayGoalsError };
+  console.log(`[Learning] Fixture ${fixtureId}: Pick ${pickType}, Won: ${pickWon}`);
+  return { resultCorrect: pickWon, homeGoalsError, awayGoalsError };
 }
 
 export async function updateModelWeights(): Promise<void> {
   console.log('[Learning] Updating model weights...');
 
-  // Get recent outcomes
-  const outcomes = await db.predictionOutcome.findMany({
-    take: 500,
-    orderBy: { createdAt: 'desc' },
+  // Get recent predictions with results
+  const results = await client.execute({
+    sql: `SELECT result FROM predictions WHERE result IN ('won', 'lost') ORDER BY created_at DESC LIMIT 500`,
+    args: [],
   });
 
-  if (outcomes.length < 20) {
+  if (results.rows.length < 20) {
     console.log('[Learning] Not enough outcomes to adjust weights');
     return;
   }
 
-  const totalPredictions = outcomes.length;
-  const correctResults = outcomes.filter(o => o.resultCorrect).length;
-  const resultAccuracy = correctResults / totalPredictions;
-
-  // Average calibration error
-  const avgCalibError = outcomes.reduce((sum, o) => sum + (o.probCalibrationError ?? 0), 0) / totalPredictions;
+  const total = results.rows.length;
+  const won = results.rows.filter(r => r.result === 'won').length;
+  const resultAccuracy = won / total;
 
   // Get current weights
-  const currentWeights = await db.modelWeights.findFirst({ where: { isActive: true } });
-  if (!currentWeights) {
-    // Create default weights
-    await db.modelWeights.create({
-      data: {
-        modelVersion: 'v1.0',
-        poissonWeight: 0.35,
-        eloWeight: 0.25,
-        formWeight: 0.20,
-        styleMatchupWeight: 0.10,
-        contextWeight: 0.10,
-        totalPredictions,
-        correctResults,
-        resultAccuracy,
-        avgCalibrationError,
-      },
+  const currentWeights = await client.execute({
+    sql: 'SELECT * FROM model_weights WHERE is_active = 1 LIMIT 1',
+    args: [],
+  });
+
+  if (currentWeights.rows.length === 0) {
+    await client.execute({
+      sql: `INSERT INTO model_weights (model_version, poisson_weight, elo_weight, form_weight, style_matchup_weight, context_weight, is_active, total_predictions, correct_results, result_accuracy)
+            VALUES ('v1.0', 0.35, 0.25, 0.20, 0.10, 0.10, 1, ?, ?, ?)`,
+      args: [total, won, resultAccuracy],
     });
     return;
   }
 
-  // Simple weight adjustment logic:
-  // If overall accuracy is improving, keep weights.
-  // If declining, nudge weights toward the model that would have been more correct.
-  // For now, implement a simple accuracy-based adjustment
+  const cw = currentWeights.rows[0];
+  const learningRate = 0.02;
 
-  const learningRate = 0.02; // How fast we adjust
-  let newPoisson = currentWeights.poissonWeight;
-  let newElo = currentWeights.eloWeight;
-  let newForm = currentWeights.formWeight;
-  let newStyle = currentWeights.styleMatchupWeight;
-  let newContext = currentWeights.contextWeight;
+  let newPoisson = (cw.poisson_weight as number);
+  let newElo = (cw.elo_weight as number);
+  let newForm = (cw.form_weight as number);
+  let newStyle = (cw.style_matchup_weight as number);
+  let newContext = (cw.context_weight as number);
 
-  // If accuracy is above 55%, the system is working — small adjustments only
-  // If below, make bigger adjustments
   if (resultAccuracy < 0.45) {
-    // Poor accuracy: try shifting weight from Poisson toward ELO and Context
     newPoisson -= learningRate * 2;
     newElo += learningRate;
     newContext += learningRate;
   } else if (resultAccuracy > 0.60) {
-    // Good accuracy: reinforce current weights, small boost to best performer
     newPoisson += learningRate * 0.5;
   }
 
-  // Normalize weights to sum to 1
-  const total = newPoisson + newElo + newForm + newStyle + newContext;
-  newPoisson /= total;
-  newElo /= total;
-  newForm /= total;
-  newStyle /= total;
-  newContext /= total;
+  // Normalize
+  const sum = newPoisson + newElo + newForm + newStyle + newContext;
+  newPoisson /= sum;
+  newElo /= sum;
+  newForm /= sum;
+  newStyle /= sum;
+  newContext /= sum;
 
-  // Create new version
-  await db.modelWeights.update({
-    where: { id: currentWeights.id },
-    data: {
-      poissonWeight: newPoisson,
-      eloWeight: newElo,
-      formWeight: newForm,
-      styleMatchupWeight: newStyle,
-      contextWeight: newContext,
-      totalPredictions,
-      correctResults,
-      resultAccuracy,
-      avgCalibrationError,
-    },
+  await client.execute({
+    sql: `UPDATE model_weights SET
+      poisson_weight = ?, elo_weight = ?, form_weight = ?, style_matchup_weight = ?, context_weight = ?,
+      total_predictions = ?, correct_results = ?, result_accuracy = ?, updated_at = datetime('now')
+      WHERE id = ?`,
+    args: [newPoisson, newElo, newForm, newStyle, newContext, total, won, resultAccuracy, cw.id as number],
   });
 
-  console.log(`[Learning] Updated weights: Poisson=${newPoisson.toFixed(3)} ELO=${newElo.toFixed(3)} Form=${newForm.toFixed(3)} Style=${newStyle.toFixed(3)} Context=${newContext.toFixed(3)} Accuracy=${(resultAccuracy * 100).toFixed(1)}%`);
+  console.log(`[Learning] Updated weights: P=${newPoisson.toFixed(3)} E=${newElo.toFixed(3)} F=${newForm.toFixed(3)} S=${newStyle.toFixed(3)} C=${newContext.toFixed(3)} Acc=${(resultAccuracy * 100).toFixed(1)}%`);
 }
 
-/** Validate all unvalidated finished matches */
+/** Validate all pending finished matches */
 export async function validateAllPending(): Promise<number> {
-  const predictions = await db.prediction.findMany({
-    where: { outcome: null },
-    include: { fixture: true },
+  const pending = await client.execute({
+    sql: `SELECT p.fixture_id FROM predictions p JOIN fixtures f ON p.fixture_id = f.id
+          WHERE p.result = 'pending' AND f.status = 'finished' AND f.home_score IS NOT NULL`,
+    args: [],
   });
 
   let validated = 0;
-  for (const pred of predictions) {
-    if (pred.fixture?.status === 'finished' && pred.fixture.homeScore !== null) {
-      await validatePrediction(pred.fixtureId);
-      validated++;
-    }
+  for (const row of pending.rows) {
+    const result = await validatePrediction(row.fixture_id as number);
+    if (result) validated++;
   }
 
-  if (validated > 0) {
-    await updateModelWeights();
-  }
+  if (validated > 0) await updateModelWeights();
 
   console.log(`[Learning] Validated ${validated} pending predictions`);
   return validated;

@@ -1,36 +1,39 @@
 import { NextResponse } from 'next/server';
 import { bsdClient } from '@/lib/bsd-client';
-import { db } from '@/lib/db';
+import { client } from '@/lib/db-turso';
 
 export async function GET() {
   try {
-    // First try BSD API live events
     const liveData = await bsdClient.getLiveEvents();
     const enrichedEvents = [];
 
     for (const event of liveData.events) {
       // Get our prediction if exists
-      const prediction = await db.prediction.findUnique({
-        where: { fixtureId: event.id },
+      const predResult = await client.execute({
+        sql: 'SELECT pick_type, pick_label, confidence, tier, home_win_prob, draw_prob, away_win_prob, verdict FROM predictions WHERE fixture_id = ?',
+        args: [event.id],
       });
 
       // Get lineup if exists
-      const lineup = await db.fixtureLineup.findUnique({
-        where: { fixtureId: event.id },
+      const lineupResult = await client.execute({
+        sql: 'SELECT home_formation, away_formation FROM fixture_lineups WHERE fixture_id = ?',
+        args: [event.id],
       });
 
       enrichedEvents.push({
         ...event,
-        prediction: prediction ? {
-          predictedResult: prediction.predictedResult,
-          probHomeWin: prediction.probHomeWin,
-          probDraw: prediction.probDraw,
-          probAwayWin: prediction.probAwayWin,
-          confidence: prediction.confidence,
+        prediction: predResult.rows.length > 0 ? {
+          pickType: predResult.rows[0].pick_type,
+          pickLabel: predResult.rows[0].pick_label,
+          confidence: predResult.rows[0].confidence,
+          tier: predResult.rows[0].tier,
+          probHomeWin: predResult.rows[0].home_win_prob,
+          probDraw: predResult.rows[0].draw_prob,
+          probAwayWin: predResult.rows[0].away_win_prob,
         } : null,
-        lineup: lineup ? {
-          homeFormation: lineup.homeFormation,
-          awayFormation: lineup.awayFormation,
+        lineup: lineupResult.rows.length > 0 ? {
+          homeFormation: lineupResult.rows[0].home_formation,
+          awayFormation: lineupResult.rows[0].away_formation,
         } : null,
       });
     }

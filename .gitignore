@@ -31,7 +31,9 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
-.env*
+.env
+.env.local
+.env*.local
 
 # vercel
 .vercel
@@ -50,5 +52,19 @@ test
 prompt
 
 server.log
+
 # Skills directory
 /skills/
+
+# Agent context (not needed in repo)
+/agent-ctx/
+
+# Download samples (not needed in repo)
+/download/
+
+# DB files
+*.db
+/db/
+
+# Prisma (we use Turso/drizzle now)
+/prisma/

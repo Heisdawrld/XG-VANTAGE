@@ -1,70 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
-import { hash } from 'bcryptjs';
+import { client } from '@/lib/db-turso';
+import bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json();
-    const { email, name, password } = body;
+    const { email, username, password } = await req.json();
 
-    if (!email || !password) {
-      return NextResponse.json(
-        { error: 'Email and password are required' },
-        { status: 400 }
-      );
+    if (!email || !username || !password) {
+      return NextResponse.json({ error: 'Email, username, and password are required' }, { status: 400 });
     }
 
     if (password.length < 6) {
-      return NextResponse.json(
-        { error: 'Password must be at least 6 characters' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Password must be at least 6 characters' }, { status: 400 });
     }
 
-    // Check if user already exists
-    const existingUser = await db.user.findUnique({
-      where: { email },
+    // Check if user exists
+    const existing = await client.execute({
+      sql: 'SELECT id FROM users WHERE email = ? OR username = ?',
+      args: [email, username],
     });
 
-    if (existingUser) {
-      return NextResponse.json(
-        { error: 'An account with this email already exists' },
-        { status: 409 }
-      );
+    if (existing.rows.length > 0) {
+      return NextResponse.json({ error: 'Email or username already exists' }, { status: 409 });
     }
 
-    // Hash password with bcryptjs
-    const passwordHash = await hash(password, 12);
+    const id = uuidv4();
+    const passwordHash = await bcrypt.hash(password, 12);
+    const referralCode = `XG${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
-    // Create user
-    const user = await db.user.create({
-      data: {
-        email,
-        name: name || null,
-        passwordHash,
-        plan: 'free',
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        plan: true,
-        createdAt: true,
-      },
+    await client.execute({
+      sql: `INSERT INTO users (id, email, username, password_hash, plan, referral_code, plan_expires_at)
+            VALUES (?, ?, ?, ?, 'premium', ?, datetime('now', '+7 days'))`,
+      args: [id, email, username, passwordHash, referralCode],
     });
 
-    return NextResponse.json(
-      {
-        message: 'Account created successfully',
-        user,
-      },
-      { status: 201 }
-    );
+    return NextResponse.json({
+      id, email, username, plan: 'premium', referralCode,
+      message: 'Account created with 7-day free trial',
+    }, { status: 201 });
   } catch (error) {
     console.error('Registration error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Registration failed' }, { status: 500 });
   }
 }

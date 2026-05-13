@@ -1,7 +1,7 @@
-// Data Sync Service — Pulls data from BSD API into our database
+// Data Sync Service — Pulls data from BSD API into Turso database
 
 import { bsdClient } from '@/lib/bsd-client';
-import { db } from '@/lib/db';
+import { client } from '@/lib/db-turso';
 
 export async function syncLeagues(): Promise<number> {
   console.log('[Sync] Syncing leagues...');
@@ -12,42 +12,21 @@ export async function syncLeagues(): Promise<number> {
   while (true) {
     const data = await bsdClient.getLeagues({ limit, offset });
     for (const league of data.results) {
-      await db.league.upsert({
-        where: { id: league.id },
-        create: {
-          id: league.id,
-          name: league.name,
-          country: league.country,
-          isWomen: league.is_women,
-          isActive: league.is_active,
-          currentSeasonId: league.current_season?.id,
-        },
-        update: {
-          name: league.name,
-          country: league.country,
-          isWomen: league.is_women,
-          isActive: league.is_active,
-          currentSeasonId: league.current_season?.id,
-        },
+      // Check if exists
+      const existing = await client.execute({
+        sql: 'SELECT id FROM leagues WHERE id = ?',
+        args: [league.id],
       });
 
-      // Sync current season
-      if (league.current_season) {
-        await db.season.upsert({
-          where: { id: league.current_season.id },
-          create: {
-            id: league.current_season.id,
-            leagueId: league.id,
-            name: league.current_season.name,
-            year: league.current_season.year,
-            startDate: league.current_season.start_date ? new Date(league.current_season.start_date) : null,
-            endDate: league.current_season.end_date ? new Date(league.current_season.end_date) : null,
-            isCurrent: league.current_season.is_current,
-          },
-          update: {
-            name: league.current_season.name,
-            isCurrent: league.current_season.is_current,
-          },
+      if (existing.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE leagues SET name = ?, country = ?, is_active = ?, season_id = ?, season_name = ? WHERE id = ?`,
+          args: [league.name, league.country, league.is_active ? 1 : 0, league.current_season?.id ?? null, league.current_season?.name ?? null, league.id],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO leagues (id, name, country, is_active, season_id, season_name) VALUES (?, ?, ?, ?, ?, ?)`,
+          args: [league.id, league.name, league.country, league.is_active ? 1 : 0, league.current_season?.id ?? null, league.current_season?.name ?? null],
         });
       }
       synced++;
@@ -65,75 +44,49 @@ export async function syncStandings(leagueId: number): Promise<number> {
     const data = await bsdClient.getLeagueStandings(leagueId);
     let synced = 0;
 
-    // Upsert season
-    if (data.season) {
-      await db.season.upsert({
-        where: { id: data.season.id },
-        create: {
-          id: data.season.id,
-          leagueId,
-          name: data.season.name,
-          year: parseInt(data.season.name.match(/\d{4}/)?.[0] || '2025'),
-          isCurrent: true,
-        },
-        update: { name: data.season.name },
-      });
-    }
-
     for (const s of data.standings) {
       // Ensure team exists
-      await db.team.upsert({
-        where: { id: s.team_id },
-        create: { id: s.team_id, name: s.team_name },
-        update: { name: s.team_name },
+      const existingTeam = await client.execute({
+        sql: 'SELECT id FROM teams WHERE id = ?',
+        args: [s.team_id],
+      });
+      if (existingTeam.rows.length === 0) {
+        await client.execute({
+          sql: 'INSERT INTO teams (id, name) VALUES (?, ?)',
+          args: [s.team_id, s.team_name],
+        });
+      } else {
+        await client.execute({
+          sql: 'UPDATE teams SET name = ? WHERE id = ?',
+          args: [s.team_name, s.team_id],
+        });
+      }
+
+      // Upsert standing
+      const existingStanding = await client.execute({
+        sql: 'SELECT id FROM standings WHERE league_id = ? AND season_id = ? AND team_id = ?',
+        args: [leagueId, data.season?.id ?? 0, s.team_id],
       });
 
-      await db.standing.upsert({
-        where: {
-          leagueId_seasonId_teamId: {
-            leagueId,
-            seasonId: data.season?.id ?? 0,
-            teamId: s.team_id,
-          },
-        },
-        create: {
-          leagueId,
-          seasonId: data.season?.id ?? 0,
-          teamId: s.team_id,
-          position: s.position,
-          played: s.played,
-          won: s.won,
-          drawn: s.drawn,
-          lost: s.lost,
-          gf: s.gf,
-          ga: s.ga,
-          gd: s.gd,
-          pts: s.pts,
-          xgf: s.xgf,
-          xga: s.xga,
-          xgd: s.xgd,
-          xgGames: s.xg_games,
-          form: s.form,
-          isLive: s.live,
-        },
-        update: {
-          position: s.position,
-          played: s.played,
-          won: s.won,
-          drawn: s.drawn,
-          lost: s.lost,
-          gf: s.gf,
-          ga: s.ga,
-          gd: s.gd,
-          pts: s.pts,
-          xgf: s.xgf,
-          xga: s.xga,
-          xgd: s.xgd,
-          xgGames: s.xg_games,
-          form: s.form,
-          isLive: s.live,
-        },
-      });
+      if (existingStanding.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE standings SET position = ?, played = ?, won = ?, drawn = ?, lost = ?,
+                gf = ?, ga = ?, gd = ?, pts = ?, xgf = ?, xga = ?, xgd = ?,
+                xg_games = ?, form = ?, is_live = ?, team_name = ?
+                WHERE league_id = ? AND season_id = ? AND team_id = ?`,
+          args: [s.position, s.played, s.won, s.drawn, s.lost, s.gf, s.ga, s.gd, s.pts,
+            s.xgf ?? null, s.xga ?? null, s.xgd ?? null, s.xg_games ?? null,
+            s.form, s.live ? 1 : 0, s.team_name,
+            leagueId, data.season?.id ?? 0, s.team_id],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO standings (league_id, season_id, team_id, team_name, position, played, won, drawn, lost, gf, ga, gd, pts, xgf, xga, xgd, xg_games, form, is_live)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [leagueId, data.season?.id ?? 0, s.team_id, s.team_name, s.position, s.played, s.won, s.drawn, s.lost, s.gf, s.ga, s.gd, s.pts,
+            s.xgf ?? null, s.xga ?? null, s.xgd ?? null, s.xg_games ?? null, s.form, s.live ? 1 : 0],
+        });
+      }
       synced++;
     }
     console.log(`[Sync] Synced ${synced} standings for league ${leagueId}`);
@@ -174,299 +127,175 @@ export async function syncFixtures(params: { dateFrom: string; dateTo: string; l
 export async function syncSingleFixture(event: {
   id: number; league_id: number; season_id?: number;
   home_team_id: number; home_team: string; away_team_id: number; away_team: string;
-  home_coach_id?: number; away_coach_id?: number; referee_id?: number; venue_id?: number;
   event_date: string; status: string; round_number?: number; round_name?: string;
-  group_name?: string; period?: string; current_minute?: number;
+  period?: string; current_minute?: number;
   home_score?: number; away_score?: number; home_score_ht?: number; away_score_ht?: number;
-  penalty_shootout?: string; extra_time_score?: string;
-  is_local_derby: boolean; is_neutral_ground: boolean; travel_distance_km?: number;
+  is_local_derby: boolean; travel_distance_km?: number;
   weather?: { code?: number; description?: string; wind_speed?: number; temperature_c?: number };
-  pitch_condition?: number; attendance?: number; live_websocket: boolean;
+  attendance?: number;
 }): Promise<void> {
-  // Ensure teams exist (skip if IDs are null)
   if (event.home_team_id == null || event.away_team_id == null) return;
 
-  await db.team.upsert({
-    where: { id: event.home_team_id },
-    create: { id: event.home_team_id, name: event.home_team },
-    update: { name: event.home_team },
-  });
-  await db.team.upsert({
-    where: { id: event.away_team_id },
-    create: { id: event.away_team_id, name: event.away_team },
-    update: { name: event.away_team },
-  });
+  // Ensure league exists (INSERT OR IGNORE for concurrency safety)
+  if (event.league_id) {
+    await client.execute({ sql: 'INSERT OR IGNORE INTO leagues (id, name) VALUES (?, ?)', args: [event.league_id, 'Unknown League'] });
+  }
+
+  // Ensure teams exist (INSERT OR REPLACE for upsert safety)
+  await client.execute({ sql: 'INSERT OR REPLACE INTO teams (id, name) VALUES (?, ?)', args: [event.home_team_id, event.home_team] });
+  await client.execute({ sql: 'INSERT OR REPLACE INTO teams (id, name) VALUES (?, ?)', args: [event.away_team_id, event.away_team] });
 
   // Upsert fixture
-  await db.fixture.upsert({
-    where: { id: event.id },
-    create: {
-      id: event.id,
-      leagueId: event.league_id,
-      seasonId: event.season_id,
-      homeTeamId: event.home_team_id,
-      awayTeamId: event.away_team_id,
-      homeCoachId: event.home_coach_id,
-      awayCoachId: event.away_coach_id,
-      refereeId: event.referee_id,
-      venueId: event.venue_id,
-      eventDate: new Date(event.event_date),
-      status: event.status,
-      roundNumber: event.round_number,
-      roundName: event.round_name ?? '',
-      groupName: event.group_name,
-      period: event.period,
-      currentMinute: event.current_minute,
-      homeScore: event.home_score,
-      awayScore: event.away_score,
-      homeScoreHt: event.home_score_ht,
-      awayScoreHt: event.away_score_ht,
-      penaltyShootout: typeof event.penalty_shootout === 'object' ? JSON.stringify(event.penalty_shootout) : (event.penalty_shootout ?? null),
-      extraTimeScore: event.extra_time_score,
-      isLocalDerby: event.is_local_derby,
-      isNeutralGround: event.is_neutral_ground,
-      travelDistanceKm: event.travel_distance_km,
-      weatherCode: event.weather?.code,
-      weatherDesc: event.weather?.description,
-      windSpeed: event.weather?.wind_speed,
-      temperatureC: event.weather?.temperature_c,
-      pitchCondition: event.pitch_condition,
-      attendance: event.attendance,
-      liveWebsocket: event.live_websocket,
-      lastSyncedAt: new Date(),
-    },
-    update: {
-      status: event.status,
-      period: event.period,
-      currentMinute: event.current_minute,
-      homeScore: event.home_score,
-      awayScore: event.away_score,
-      homeScoreHt: event.home_score_ht,
-      awayScoreHt: event.away_score_ht,
-      lastSyncedAt: new Date(),
-    },
+  await client.execute({
+    sql: `INSERT INTO fixtures (id, league_id, season_id, home_team_id, away_team_id, event_date, status,
+          round_number, round_name, period, current_minute, home_score, away_score, home_score_ht, away_score_ht,
+          is_local_derby, travel_distance_km, weather_code, weather_desc, temperature, wind_speed, attendance, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status, period = excluded.period, current_minute = excluded.current_minute,
+          home_score = excluded.home_score, away_score = excluded.away_score,
+          home_score_ht = excluded.home_score_ht, away_score_ht = excluded.away_score_ht,
+          updated_at = datetime('now')`,
+    args: [
+      event.id, event.league_id, event.season_id ?? null,
+      event.home_team_id, event.away_team_id, event.event_date, event.status,
+      event.round_number ?? null, event.round_name ?? null, event.period ?? null, event.current_minute ?? null,
+      event.home_score ?? null, event.away_score ?? null, event.home_score_ht ?? null, event.away_score_ht ?? null,
+      event.is_local_derby ? 1 : 0, event.travel_distance_km ?? null,
+      event.weather?.code ?? null, event.weather?.description ?? null,
+      event.weather?.temperature_c ?? null, event.weather?.wind_speed ?? null,
+      event.attendance ?? null,
+    ],
   });
 }
 
 export async function syncFixtureDetails(fixtureId: number): Promise<void> {
   console.log(`[Sync] Syncing details for fixture ${fixtureId}...`);
 
+  // Sync stats
   try {
-    // Sync stats
     const stats = await bsdClient.getEventStats(fixtureId);
     if (stats.stats?.home && stats.stats?.away) {
       const home = stats.stats.home as Record<string, unknown>;
       const away = stats.stats.away as Record<string, unknown>;
-      await db.fixtureStats.upsert({
-        where: { fixtureId },
-        create: {
-          fixtureId,
-          homeTotalShots: (home.total_shots as number) ?? 0,
-          homeShotsOnTarget: (home.shots_on_target as number) ?? 0,
-          homeBallPossession: (home.ball_possession as number) ?? 50,
-          homeExpectedGoals: (home.expected_goals as number) ?? (home.xg as Record<string, unknown>)?.actual as number ?? 0,
-          homeCornerKicks: (home.corner_kicks as number) ?? 0,
-          homeFouls: (home.fouls as number) ?? 0,
-          homeYellowCards: (home.yellow_cards as number) ?? 0,
-          homeRedCards: (home.red_cards as number) ?? 0,
-          homeAttacks: (home.attack as number) ?? 0,
-          homeDangerousAttacks: (home.dangerous_attack as number) ?? 0,
-          awayTotalShots: (away.total_shots as number) ?? 0,
-          awayShotsOnTarget: (away.shots_on_target as number) ?? 0,
-          awayBallPossession: (away.ball_possession as number) ?? 50,
-          awayExpectedGoals: (away.expected_goals as number) ?? (away.xg as Record<string, unknown>)?.actual as number ?? 0,
-          awayCornerKicks: (away.corner_kicks as number) ?? 0,
-          awayFouls: (away.fouls as number) ?? 0,
-          awayYellowCards: (away.yellow_cards as number) ?? 0,
-          awayRedCards: (away.red_cards as number) ?? 0,
-          awayAttacks: (away.attack as number) ?? 0,
-          awayDangerousAttacks: (away.dangerous_attack as number) ?? 0,
-        },
-        update: {
-          homeTotalShots: (home.total_shots as number) ?? 0,
-          homeShotsOnTarget: (home.shots_on_target as number) ?? 0,
-          homeBallPossession: (home.ball_possession as number) ?? 50,
-          homeExpectedGoals: (home.expected_goals as number) ?? 0,
-          awayTotalShots: (away.total_shots as number) ?? 0,
-          awayShotsOnTarget: (away.shots_on_target as number) ?? 0,
-          awayBallPossession: (away.ball_possession as number) ?? 50,
-          awayExpectedGoals: (away.expected_goals as number) ?? 0,
-        },
-      });
-    }
-  } catch { /* Stats might not be available */ }
 
-  try {
-    // Sync odds
-    const odds = await bsdClient.getEventOdds(fixtureId);
-    if (odds.odds) {
-      await db.fixtureOdds.upsert({
-        where: { fixtureId },
-        create: {
-          fixtureId,
-          homeWin: odds.odds.home_win,
-          draw: odds.odds.draw,
-          awayWin: odds.odds.away_win,
-          over15Goals: odds.odds.over_15_goals,
-          over25Goals: odds.odds.over_25_goals,
-          over35Goals: odds.odds.over_35_goals,
-          under15Goals: odds.odds.under_15_goals,
-          under25Goals: odds.odds.under_25_goals,
-          under35Goals: odds.odds.under_35_goals,
-          bttsYes: odds.odds.btts_yes,
-          bttsNo: odds.odds.btts_no,
-        },
-        update: {
-          homeWin: odds.odds.home_win,
-          draw: odds.odds.draw,
-          awayWin: odds.odds.away_win,
-          over25Goals: odds.odds.over_25_goals,
-          bttsYes: odds.odds.btts_yes,
-        },
-      });
-    }
-  } catch { /* Odds might not be available */ }
-
-  try {
-    // Sync lineups
-    const lineups = await bsdClient.getEventLineups(fixtureId);
-    await db.fixtureLineup.upsert({
-      where: { fixtureId },
-      create: {
-        fixtureId,
-        lineupStatus: lineups.lineup_status,
-        homeFormation: lineups.lineups?.home?.formation ?? '',
-        awayFormation: lineups.lineups?.away?.formation ?? '',
-        homePlayers: JSON.stringify(lineups.lineups?.home?.players ?? []),
-        awayPlayers: JSON.stringify(lineups.lineups?.away?.players ?? []),
-        homeSubstitutes: JSON.stringify(lineups.lineups?.home?.substitutes ?? []),
-        awaySubstitutes: JSON.stringify(lineups.lineups?.away?.substitutes ?? []),
-        homeUnavailable: JSON.stringify(lineups.unavailable_players?.home ?? []),
-        awayUnavailable: JSON.stringify(lineups.unavailable_players?.away ?? []),
-        homeConfidence: lineups.lineups?.home?.confidence,
-        awayConfidence: lineups.lineups?.away?.confidence,
-        updatedAt: lineups.updated_at ? new Date(lineups.updated_at) : null,
-      },
-      update: {
-        lineupStatus: lineups.lineup_status,
-        homeFormation: lineups.lineups?.home?.formation ?? '',
-        awayFormation: lineups.lineups?.away?.formation ?? '',
-        homePlayers: JSON.stringify(lineups.lineups?.home?.players ?? []),
-        awayPlayers: JSON.stringify(lineups.lineups?.away?.players ?? []),
-        updatedAt: lineups.updated_at ? new Date(lineups.updated_at) : null,
-      },
-    });
-  } catch { /* Lineups might not be available */ }
-
-  try {
-    // Sync incidents
-    const incidents = await bsdClient.getEventIncidents(fixtureId);
-    if (incidents.incidents?.length) {
-      // Delete old and re-insert
-      await db.fixtureIncident.deleteMany({ where: { fixtureId } });
-      for (const inc of incidents.incidents) {
-        await db.fixtureIncident.create({
-          data: {
+      const existingStats = await client.execute({ sql: 'SELECT id FROM fixture_stats WHERE fixture_id = ?', args: [fixtureId] });
+      if (existingStats.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE fixture_stats SET
+            home_total_shots = ?, home_shots_on_target = ?, home_ball_possession = ?, home_expected_goals = ?,
+            home_corner_kicks = ?, home_fouls = ?, home_yellow_cards = ?, home_red_cards = ?,
+            home_attacks = ?, home_dangerous_attacks = ?,
+            away_total_shots = ?, away_shots_on_target = ?, away_ball_possession = ?, away_expected_goals = ?,
+            away_corner_kicks = ?, away_fouls = ?, away_yellow_cards = ?, away_red_cards = ?,
+            away_attacks = ?, away_dangerous_attacks = ?
+            WHERE fixture_id = ?`,
+          args: [
+            (home.total_shots as number) ?? 0, (home.shots_on_target as number) ?? 0,
+            (home.ball_possession as number) ?? 50, (home.expected_goals as number) ?? 0,
+            (home.corner_kicks as number) ?? 0, (home.fouls as number) ?? 0,
+            (home.yellow_cards as number) ?? 0, (home.red_cards as number) ?? 0,
+            (home.attack as number) ?? 0, (home.dangerous_attack as number) ?? 0,
+            (away.total_shots as number) ?? 0, (away.shots_on_target as number) ?? 0,
+            (away.ball_possession as number) ?? 50, (away.expected_goals as number) ?? 0,
+            (away.corner_kicks as number) ?? 0, (away.fouls as number) ?? 0,
+            (away.yellow_cards as number) ?? 0, (away.red_cards as number) ?? 0,
+            (away.attack as number) ?? 0, (away.dangerous_attack as number) ?? 0,
             fixtureId,
-            type: inc.type,
-            minute: inc.minute,
-            addedTime: inc.added_time,
-            player: inc.player,
-            playerId: inc.player_id,
-            playerIn: inc.player_in,
-            playerInId: inc.player_in_id,
-            playerOut: inc.player_out,
-            playerOutId: inc.player_out_id,
-            isHome: inc.is_home,
-            cardType: inc.card_type,
-            goalType: inc.goal_type,
-            decision: inc.decision,
-            confirmed: inc.confirmed,
-            homeScore: inc.home_score,
-            awayScore: inc.away_score,
-          },
+          ],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO fixture_stats (fixture_id, home_total_shots, home_shots_on_target, home_ball_possession, home_expected_goals,
+                home_corner_kicks, home_fouls, home_yellow_cards, home_red_cards, home_attacks, home_dangerous_attacks,
+                away_total_shots, away_shots_on_target, away_ball_possession, away_expected_goals,
+                away_corner_kicks, away_fouls, away_yellow_cards, away_red_cards, away_attacks, away_dangerous_attacks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            fixtureId,
+            (home.total_shots as number) ?? 0, (home.shots_on_target as number) ?? 0,
+            (home.ball_possession as number) ?? 50, (home.expected_goals as number) ?? 0,
+            (home.corner_kicks as number) ?? 0, (home.fouls as number) ?? 0,
+            (home.yellow_cards as number) ?? 0, (home.red_cards as number) ?? 0,
+            (home.attack as number) ?? 0, (home.dangerous_attack as number) ?? 0,
+            (away.total_shots as number) ?? 0, (away.shots_on_target as number) ?? 0,
+            (away.ball_possession as number) ?? 50, (away.expected_goals as number) ?? 0,
+            (away.corner_kicks as number) ?? 0, (away.fouls as number) ?? 0,
+            (away.yellow_cards as number) ?? 0, (away.red_cards as number) ?? 0,
+            (away.attack as number) ?? 0, (away.dangerous_attack as number) ?? 0,
+          ],
         });
       }
     }
-  } catch { /* Incidents might not be available */ }
+  } catch { /* Stats might not be available */ }
 
+  // Sync odds
   try {
-    // Sync metadata
-    const meta = await bsdClient.getEventMetadata(fixtureId);
-    await db.fixtureMetadata.upsert({
-      where: { fixtureId },
-      create: {
-        fixtureId,
-        funFacts: JSON.stringify(meta.funfacts ?? []),
-        aiPreview: meta.ai_preview?.text ?? '',
-        aiGeneratedAt: meta.ai_preview?.generated_at ? new Date(meta.ai_preview.generated_at) : null,
-      },
-      update: {
-        funFacts: JSON.stringify(meta.funfacts ?? []),
-        aiPreview: meta.ai_preview?.text ?? '',
-      },
-    });
-  } catch { /* Metadata might not be available */ }
-}
-
-export async function syncManagers(): Promise<number> {
-  console.log('[Sync] Syncing managers...');
-  let synced = 0;
-  let offset = 0;
-  const limit = 200;
-
-  while (true) {
-    const data = await bsdClient.getManagers({ limit, offset });
-    for (const m of data.results) {
-      await db.manager.upsert({
-        where: { id: m.id },
-        create: {
-          id: m.id,
-          name: m.name,
-          shortName: m.short_name,
-          country: m.country,
-          tacticalProfile: m.tactical_profile || 'balanced',
-          preferredFormation: m.preferred_formation || '',
-          currentTeamId: m.current_team_id,
-          matchesTotal: m.matches_total ?? 0,
-          wins: m.wins ?? 0,
-          draws: m.draws ?? 0,
-          losses: m.losses ?? 0,
-          winPct: m.win_pct ?? 0,
-          avgGoalsScored: m.avg_goals_scored ?? 0,
-          avgGoalsConceded: m.avg_goals_conceded ?? 0,
-          avgPossession: m.avg_possession ?? 50,
-          cleanSheetPct: m.clean_sheet_pct ?? 0,
-          bttsPct: m.btts_pct ?? 0,
-          over25Pct: m.over_25_pct ?? 0,
-          teamStyle: m.team_style ?? '',
-          statsUpdatedAt: new Date(),
-        },
-        update: {
-          tacticalProfile: m.tactical_profile ?? 'balanced',
-          preferredFormation: m.preferred_formation ?? '',
-          currentTeamId: m.current_team_id,
-          matchesTotal: m.matches_total ?? 0,
-          wins: m.wins ?? 0,
-          draws: m.draws ?? 0,
-          losses: m.losses ?? 0,
-          winPct: m.win_pct ?? 0,
-          avgGoalsScored: m.avg_goals_scored ?? 0,
-          avgGoalsConceded: m.avg_goals_conceded ?? 0,
-          avgPossession: m.avg_possession ?? 50,
-          cleanSheetPct: m.clean_sheet_pct ?? 0,
-          bttsPct: m.btts_pct ?? 0,
-          over25Pct: m.over_25_pct ?? 0,
-          teamStyle: m.team_style ?? '',
-        },
-      });
-      synced++;
+    const odds = await bsdClient.getEventOdds(fixtureId);
+    if (odds.odds) {
+      const existingOdds = await client.execute({ sql: 'SELECT id FROM fixture_odds WHERE fixture_id = ?', args: [fixtureId] });
+      if (existingOdds.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE fixture_odds SET home_win = ?, draw = ?, away_win = ?,
+                over_15_goals = ?, over_25_goals = ?, over_35_goals = ?,
+                under_15_goals = ?, under_25_goals = ?, under_35_goals = ?,
+                btts_yes = ?, btts_no = ? WHERE fixture_id = ?`,
+          args: [odds.odds.home_win ?? null, odds.odds.draw ?? null, odds.odds.away_win ?? null,
+            odds.odds.over_15_goals ?? null, odds.odds.over_25_goals ?? null, odds.odds.over_35_goals ?? null,
+            odds.odds.under_15_goals ?? null, odds.odds.under_25_goals ?? null, odds.odds.under_35_goals ?? null,
+            odds.odds.btts_yes ?? null, odds.odds.btts_no ?? null, fixtureId],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO fixture_odds (fixture_id, home_win, draw, away_win, over_15_goals, over_25_goals, over_35_goals,
+                under_15_goals, under_25_goals, under_35_goals, btts_yes, btts_no)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [fixtureId, odds.odds.home_win ?? null, odds.odds.draw ?? null, odds.odds.away_win ?? null,
+            odds.odds.over_15_goals ?? null, odds.odds.over_25_goals ?? null, odds.odds.over_35_goals ?? null,
+            odds.odds.under_15_goals ?? null, odds.odds.under_25_goals ?? null, odds.odds.under_35_goals ?? null,
+            odds.odds.btts_yes ?? null, odds.odds.btts_no ?? null],
+        });
+      }
     }
-    if (!data.next || data.results.length < limit) break;
-    offset += limit;
-  }
-  console.log(`[Sync] Synced ${synced} managers`);
-  return synced;
+  } catch { /* Odds might not be available */ }
+
+  // Sync lineups
+  try {
+    const lineups = await bsdClient.getEventLineups(fixtureId);
+    const existingLineup = await client.execute({ sql: 'SELECT id FROM fixture_lineups WHERE fixture_id = ?', args: [fixtureId] });
+
+    if (existingLineup.rows.length > 0) {
+      await client.execute({
+        sql: `UPDATE fixture_lineups SET lineup_status = ?, home_formation = ?, away_formation = ?,
+              home_players = ?, away_players = ?, home_substitutes = ?, away_substitutes = ?,
+              home_unavailable = ?, away_unavailable = ?, updated_at = datetime('now')
+              WHERE fixture_id = ?`,
+        args: [lineups.lineup_status,
+          lineups.lineups?.home?.formation ?? '', lineups.lineups?.away?.formation ?? '',
+          JSON.stringify(lineups.lineups?.home?.players ?? []),
+          JSON.stringify(lineups.lineups?.away?.players ?? []),
+          JSON.stringify(lineups.lineups?.home?.substitutes ?? []),
+          JSON.stringify(lineups.lineups?.away?.substitutes ?? []),
+          JSON.stringify(lineups.unavailable_players?.home ?? []),
+          JSON.stringify(lineups.unavailable_players?.away ?? []),
+          fixtureId],
+      });
+    } else {
+      await client.execute({
+        sql: `INSERT INTO fixture_lineups (fixture_id, lineup_status, home_formation, away_formation,
+              home_players, away_players, home_substitutes, away_substitutes, home_unavailable, away_unavailable, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        args: [fixtureId, lineups.lineup_status,
+          lineups.lineups?.home?.formation ?? '', lineups.lineups?.away?.formation ?? '',
+          JSON.stringify(lineups.lineups?.home?.players ?? []),
+          JSON.stringify(lineups.lineups?.away?.players ?? []),
+          JSON.stringify(lineups.lineups?.home?.substitutes ?? []),
+          JSON.stringify(lineups.lineups?.away?.substitutes ?? []),
+          JSON.stringify(lineups.unavailable_players?.home ?? []),
+          JSON.stringify(lineups.unavailable_players?.away ?? [])],
+      });
+    }
+  } catch { /* Lineups might not be available */ }
 }
 
 /** Full daily sync — run this on a schedule */
@@ -478,26 +307,23 @@ export async function fullDailySync(): Promise<{ leagues: number; fixtures: numb
   // Sync leagues
   const leagues = await syncLeagues();
 
-  // Sync fixtures (yesterday through tomorrow for live + recent results + upcoming)
+  // Sync fixtures (yesterday through tomorrow)
   const fixtures = await syncFixtures({ dateFrom: yesterday, dateTo: tomorrow });
 
   // Sync standings for top leagues
-  const topLeagues = [17, 3, 9, 6, 13, 14, 30, 29, 34, 8]; // EPL, La Liga, Serie A, Ligue 1, etc.
+  const topLeagues = [17, 3, 9, 6, 13, 14, 30, 29, 34, 8];
   let standings = 0;
   for (const lid of topLeagues) {
     standings += await syncStandings(lid);
   }
 
-  // Sync managers
-  await syncManagers();
-
-  // Sync details for today's finished matches
-  const finishedToday = await db.fixture.findMany({
-    where: { status: 'finished', eventDate: { gte: new Date(yesterday) } },
-    take: 50,
+  // Sync details for today's matches
+  const todayFixtures = await client.execute({
+    sql: "SELECT id FROM fixtures WHERE event_date >= ? AND event_date < ? LIMIT 50",
+    args: [today, tomorrow],
   });
-  for (const f of finishedToday) {
-    await syncFixtureDetails(f.id);
+  for (const f of todayFixtures.rows) {
+    await syncFixtureDetails(f.id as number);
   }
 
   return { leagues, fixtures, standings };

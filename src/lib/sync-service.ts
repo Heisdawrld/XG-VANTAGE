@@ -1,815 +1,504 @@
-// xG-Vantage — Data Sync Service
-// Syncs data from BSD API into our Prisma database
-// Uses upsert to avoid duplicates, handles pagination, logs progress
+// Data Sync Service — Pulls data from BSD API into our database
 
 import { bsdClient } from '@/lib/bsd-client';
-import type {
-  BSDFixture,
-  BSDLeague,
-  BSDIncident,
-  BSDOdds,
-  BSDLineup,
-  BSDPlayerStat,
-  BSDEventStats,
-  BSDStanding,
-  BSDStandingEntry,
-  BSDManager,
-  BSDSquadPlayer,
-} from '@/lib/bsd-client';
 import { db } from '@/lib/db';
 
-// ============================================================================
-// SYNC LEAGUES
-// ============================================================================
-
-export async function syncLeagues(): Promise<{ leagues: number; seasons: number }> {
-  console.log('[Sync] Starting league sync...');
-  let leagueCount = 0;
-  let seasonCount = 0;
-
+export async function syncLeagues(): Promise<number> {
+  console.log('[Sync] Syncing leagues...');
+  let synced = 0;
   let offset = 0;
-  const limit = 100;
-  let hasMore = true;
+  const limit = 200;
 
-  while (hasMore) {
-    const response = await bsdClient.getLeagues({ is_active: true, limit, offset });
-    console.log(`[Sync] Fetched ${response.results.length} leagues (offset: ${offset})`);
+  while (true) {
+    const data = await bsdClient.getLeagues({ limit, offset });
+    for (const league of data.results) {
+      await db.league.upsert({
+        where: { id: league.id },
+        create: {
+          id: league.id,
+          name: league.name,
+          country: league.country,
+          isWomen: league.is_women,
+          isActive: league.is_active,
+          currentSeasonId: league.current_season?.id,
+        },
+        update: {
+          name: league.name,
+          country: league.country,
+          isWomen: league.is_women,
+          isActive: league.is_active,
+          currentSeasonId: league.current_season?.id,
+        },
+      });
 
-    for (const league of response.results) {
-      await upsertLeague(league);
-      leagueCount++;
-
-      // Upsert seasons
-      if (league.seasons && league.seasons.length > 0) {
-        for (const season of league.seasons) {
-          await db.season.upsert({
-            where: { id: season.id },
-            update: {
-              name: season.name,
-              year: parseInt(season.year, 10) || 0,
-              startDate: season.start_date ? new Date(season.start_date) : null,
-              endDate: season.end_date ? new Date(season.end_date) : null,
-              isCurrent: season.is_current,
-              leagueId: league.id,
-            },
-            create: {
-              id: season.id,
-              name: season.name,
-              year: parseInt(season.year, 10) || 0,
-              startDate: season.start_date ? new Date(season.start_date) : null,
-              endDate: season.end_date ? new Date(season.end_date) : null,
-              isCurrent: season.is_current,
-              leagueId: league.id,
-            },
-          });
-          seasonCount++;
-        }
-      }
-
-      // Update league's currentSeasonId
+      // Sync current season
       if (league.current_season) {
-        await db.league.update({
-          where: { id: league.id },
-          data: { currentSeasonId: league.current_season.id },
+        await db.season.upsert({
+          where: { id: league.current_season.id },
+          create: {
+            id: league.current_season.id,
+            leagueId: league.id,
+            name: league.current_season.name,
+            year: league.current_season.year,
+            startDate: league.current_season.start_date ? new Date(league.current_season.start_date) : null,
+            endDate: league.current_season.end_date ? new Date(league.current_season.end_date) : null,
+            isCurrent: league.current_season.is_current,
+          },
+          update: {
+            name: league.current_season.name,
+            isCurrent: league.current_season.is_current,
+          },
         });
       }
+      synced++;
     }
-
-    if (response.next) {
-      offset += limit;
-    } else {
-      hasMore = false;
-    }
+    if (!data.next || data.results.length < limit) break;
+    offset += limit;
   }
-
-  console.log(`[Sync] League sync complete: ${leagueCount} leagues, ${seasonCount} seasons`);
-  return { leagues: leagueCount, seasons: seasonCount };
+  console.log(`[Sync] Synced ${synced} leagues`);
+  return synced;
 }
 
-async function upsertLeague(league: BSDLeague): Promise<void> {
-  await db.league.upsert({
-    where: { id: league.id },
-    update: {
-      name: league.name,
-      country: league.country?.name ?? '',
-      isActive: league.is_active,
-      isWomen: league.is_women,
-    },
-    create: {
-      id: league.id,
-      name: league.name,
-      country: league.country?.name ?? '',
-      isActive: league.is_active,
-      isWomen: league.is_women,
-    },
-  });
-}
+export async function syncStandings(leagueId: number): Promise<number> {
+  console.log(`[Sync] Syncing standings for league ${leagueId}...`);
+  try {
+    const data = await bsdClient.getLeagueStandings(leagueId);
+    let synced = 0;
 
-// ============================================================================
-// SYNC STANDINGS
-// ============================================================================
+    // Upsert season
+    if (data.season) {
+      await db.season.upsert({
+        where: { id: data.season.id },
+        create: {
+          id: data.season.id,
+          leagueId,
+          name: data.season.name,
+          year: parseInt(data.season.name.match(/\d{4}/)?.[0] || '2025'),
+          isCurrent: true,
+        },
+        update: { name: data.season.name },
+      });
+    }
 
-export async function syncStandings(leagueId: number): Promise<{ standings: number }> {
-  console.log(`[Sync] Starting standings sync for league ${leagueId}...`);
-  let standingsCount = 0;
-
-  const standingData = await bsdClient.getLeagueStandings(leagueId);
-
-  for (const group of standingData.standings) {
-    for (const entry of group.table) {
-      // Ensure team exists first
+    for (const s of data.standings) {
+      // Ensure team exists
       await db.team.upsert({
-        where: { id: entry.team_id },
-        update: { name: entry.team_name },
-        create: { id: entry.team_id, name: entry.team_name },
+        where: { id: s.team_id },
+        create: { id: s.team_id, name: s.team_name },
+        update: { name: s.team_name },
       });
 
       await db.standing.upsert({
         where: {
           leagueId_seasonId_teamId: {
-            leagueId: standingData.league_id,
-            seasonId: standingData.season_id,
-            teamId: entry.team_id,
+            leagueId,
+            seasonId: data.season?.id ?? 0,
+            teamId: s.team_id,
           },
         },
-        update: {
-          position: entry.position,
-          played: entry.played,
-          won: entry.won,
-          drawn: entry.drawn,
-          lost: entry.lost,
-          gf: entry.gf,
-          ga: entry.ga,
-          gd: entry.gd,
-          pts: entry.pts,
-          xgf: entry.xgf,
-          xga: entry.xga,
-          xgd: entry.xgd,
-          xgGames: entry.xg_games,
-          form: entry.form,
-          isLive: entry.is_live,
-        },
         create: {
-          leagueId: standingData.league_id,
-          seasonId: standingData.season_id,
-          teamId: entry.team_id,
-          position: entry.position,
-          played: entry.played,
-          won: entry.won,
-          drawn: entry.drawn,
-          lost: entry.lost,
-          gf: entry.gf,
-          ga: entry.ga,
-          gd: entry.gd,
-          pts: entry.pts,
-          xgf: entry.xgf,
-          xga: entry.xga,
-          xgd: entry.xgd,
-          xgGames: entry.xg_games,
-          form: entry.form,
-          isLive: entry.is_live,
+          leagueId,
+          seasonId: data.season?.id ?? 0,
+          teamId: s.team_id,
+          position: s.position,
+          played: s.played,
+          won: s.won,
+          drawn: s.drawn,
+          lost: s.lost,
+          gf: s.gf,
+          ga: s.ga,
+          gd: s.gd,
+          pts: s.pts,
+          xgf: s.xgf,
+          xga: s.xga,
+          xgd: s.xgd,
+          xgGames: s.xg_games,
+          form: s.form,
+          isLive: s.live,
+        },
+        update: {
+          position: s.position,
+          played: s.played,
+          won: s.won,
+          drawn: s.drawn,
+          lost: s.lost,
+          gf: s.gf,
+          ga: s.ga,
+          gd: s.gd,
+          pts: s.pts,
+          xgf: s.xgf,
+          xga: s.xga,
+          xgd: s.xgd,
+          xgGames: s.xg_games,
+          form: s.form,
+          isLive: s.live,
         },
       });
-      standingsCount++;
+      synced++;
     }
+    console.log(`[Sync] Synced ${synced} standings for league ${leagueId}`);
+    return synced;
+  } catch (err) {
+    console.error(`[Sync] Failed standings for league ${leagueId}:`, err);
+    return 0;
   }
-
-  console.log(`[Sync] Standings sync complete for league ${leagueId}: ${standingsCount} entries`);
-  return { standings: standingsCount };
 }
 
-// ============================================================================
-// SYNC FIXTURES
-// ============================================================================
-
-interface SyncFixturesParams {
-  leagueId?: number;
-  dateFrom?: string;
-  dateTo?: string;
-  status?: string;
-  fetchDetails?: boolean; // Whether to also fetch stats, incidents, odds, lineups, player stats
-}
-
-export async function syncFixtures(params: SyncFixturesParams = {}): Promise<{ fixtures: number; details: number }> {
-  console.log(`[Sync] Starting fixture sync with params:`, params);
-  let fixtureCount = 0;
-  let detailCount = 0;
-
+export async function syncFixtures(params: { dateFrom: string; dateTo: string; leagueId?: number }): Promise<number> {
+  console.log(`[Sync] Syncing fixtures ${params.dateFrom} to ${params.dateTo}...`);
+  let synced = 0;
   let offset = 0;
-  const limit = 50;
-  let hasMore = true;
+  const limit = 200;
 
-  while (hasMore) {
-    const response = await bsdClient.getEvents({
-      league_id: params.leagueId,
-      status: params.status,
+  while (true) {
+    const data = await bsdClient.getEvents({
       date_from: params.dateFrom,
       date_to: params.dateTo,
+      league_id: params.leagueId,
       limit,
       offset,
     });
-    console.log(`[Sync] Fetched ${response.results.length} fixtures (offset: ${offset})`);
 
-    for (const fixture of response.results) {
-      await upsertFixture(fixture);
-      fixtureCount++;
-
-      // For finished matches, fetch and store detailed data
-      const shouldFetchDetails = params.fetchDetails !== false && (fixture.status === 'finished' || fixture.status === 'FT');
-      if (shouldFetchDetails) {
-        try {
-          await syncFixtureDetails(fixture.id);
-          detailCount++;
-        } catch (error) {
-          console.error(`[Sync] Error fetching details for fixture ${fixture.id}:`, error);
-        }
-      }
+    for (const event of data.results) {
+      await syncSingleFixture(event);
+      synced++;
     }
 
-    if (response.next) {
-      offset += limit;
-    } else {
-      hasMore = false;
-    }
+    if (!data.next || data.results.length < limit) break;
+    offset += limit;
   }
-
-  console.log(`[Sync] Fixture sync complete: ${fixtureCount} fixtures, ${detailCount} with details`);
-  return { fixtures: fixtureCount, details: detailCount };
+  console.log(`[Sync] Synced ${synced} fixtures`);
+  return synced;
 }
 
-async function upsertFixture(fixture: BSDFixture): Promise<void> {
-  // Ensure teams exist
-  await db.team.upsert({
-    where: { id: fixture.home_team.id },
-    update: { name: fixture.home_team.name, shortName: fixture.home_team.short_name ?? '', country: fixture.home_team.country?.name ?? '' },
-    create: { id: fixture.home_team.id, name: fixture.home_team.name, shortName: fixture.home_team.short_name ?? '', country: fixture.home_team.country?.name ?? '' },
-  });
+export async function syncSingleFixture(event: {
+  id: number; league_id: number; season_id?: number;
+  home_team_id: number; home_team: string; away_team_id: number; away_team: string;
+  home_coach_id?: number; away_coach_id?: number; referee_id?: number; venue_id?: number;
+  event_date: string; status: string; round_number?: number; round_name?: string;
+  group_name?: string; period?: string; current_minute?: number;
+  home_score?: number; away_score?: number; home_score_ht?: number; away_score_ht?: number;
+  penalty_shootout?: string; extra_time_score?: string;
+  is_local_derby: boolean; is_neutral_ground: boolean; travel_distance_km?: number;
+  weather?: { code?: number; description?: string; wind_speed?: number; temperature_c?: number };
+  pitch_condition?: number; attendance?: number; live_websocket: boolean;
+}): Promise<void> {
+  // Ensure teams exist (skip if IDs are null)
+  if (event.home_team_id == null || event.away_team_id == null) return;
 
   await db.team.upsert({
-    where: { id: fixture.away_team.id },
-    update: { name: fixture.away_team.name, shortName: fixture.away_team.short_name ?? '', country: fixture.away_team.country?.name ?? '' },
-    create: { id: fixture.away_team.id, name: fixture.away_team.name, shortName: fixture.away_team.short_name ?? '', country: fixture.away_team.country?.name ?? '' },
+    where: { id: event.home_team_id },
+    create: { id: event.home_team_id, name: event.home_team },
+    update: { name: event.home_team },
+  });
+  await db.team.upsert({
+    where: { id: event.away_team_id },
+    create: { id: event.away_team_id, name: event.away_team },
+    update: { name: event.away_team },
   });
 
+  // Upsert fixture
   await db.fixture.upsert({
-    where: { id: fixture.id },
-    update: {
-      leagueId: fixture.league.id,
-      seasonId: fixture.season?.id ?? null,
-      homeTeamId: fixture.home_team.id,
-      awayTeamId: fixture.away_team.id,
-      homeCoachId: fixture.home_coach?.id ?? null,
-      awayCoachId: fixture.away_coach?.id ?? null,
-      refereeId: fixture.referee?.id ?? null,
-      venueId: fixture.venue?.id ?? null,
-      eventDate: new Date(fixture.event_date),
-      status: fixture.status,
-      roundNumber: fixture.round_number,
-      roundName: fixture.round_name ?? '',
-      groupName: fixture.group_name ?? null,
-      period: fixture.period ?? null,
-      currentMinute: fixture.current_minute ?? null,
-      homeScore: fixture.home_score ?? null,
-      awayScore: fixture.away_score ?? null,
-      homeScoreHt: fixture.home_score_ht ?? null,
-      awayScoreHt: fixture.away_score_ht ?? null,
-      penaltyShootout: fixture.penalty_shootout ?? null,
-      extraTimeScore: fixture.extra_time_score ?? null,
-      isLocalDerby: fixture.is_local_derby,
-      isNeutralGround: fixture.is_neutral_ground,
-      weatherCode: fixture.weather_code ?? null,
-      weatherDesc: fixture.weather_desc ?? null,
-      windSpeed: fixture.wind_speed ?? null,
-      temperatureC: fixture.temperature_c ?? null,
-      pitchCondition: fixture.pitch_condition ?? null,
-      attendance: fixture.attendance ?? null,
-      liveWebsocket: fixture.live_websocket,
+    where: { id: event.id },
+    create: {
+      id: event.id,
+      leagueId: event.league_id,
+      seasonId: event.season_id,
+      homeTeamId: event.home_team_id,
+      awayTeamId: event.away_team_id,
+      homeCoachId: event.home_coach_id,
+      awayCoachId: event.away_coach_id,
+      refereeId: event.referee_id,
+      venueId: event.venue_id,
+      eventDate: new Date(event.event_date),
+      status: event.status,
+      roundNumber: event.round_number,
+      roundName: event.round_name ?? '',
+      groupName: event.group_name,
+      period: event.period,
+      currentMinute: event.current_minute,
+      homeScore: event.home_score,
+      awayScore: event.away_score,
+      homeScoreHt: event.home_score_ht,
+      awayScoreHt: event.away_score_ht,
+      penaltyShootout: typeof event.penalty_shootout === 'object' ? JSON.stringify(event.penalty_shootout) : (event.penalty_shootout ?? null),
+      extraTimeScore: event.extra_time_score,
+      isLocalDerby: event.is_local_derby,
+      isNeutralGround: event.is_neutral_ground,
+      travelDistanceKm: event.travel_distance_km,
+      weatherCode: event.weather?.code,
+      weatherDesc: event.weather?.description,
+      windSpeed: event.weather?.wind_speed,
+      temperatureC: event.weather?.temperature_c,
+      pitchCondition: event.pitch_condition,
+      attendance: event.attendance,
+      liveWebsocket: event.live_websocket,
       lastSyncedAt: new Date(),
     },
-    create: {
-      id: fixture.id,
-      leagueId: fixture.league.id,
-      seasonId: fixture.season?.id ?? null,
-      homeTeamId: fixture.home_team.id,
-      awayTeamId: fixture.away_team.id,
-      homeCoachId: fixture.home_coach?.id ?? null,
-      awayCoachId: fixture.away_coach?.id ?? null,
-      refereeId: fixture.referee?.id ?? null,
-      venueId: fixture.venue?.id ?? null,
-      eventDate: new Date(fixture.event_date),
-      status: fixture.status,
-      roundNumber: fixture.round_number,
-      roundName: fixture.round_name ?? '',
-      groupName: fixture.group_name ?? null,
-      period: fixture.period ?? null,
-      currentMinute: fixture.current_minute ?? null,
-      homeScore: fixture.home_score ?? null,
-      awayScore: fixture.away_score ?? null,
-      homeScoreHt: fixture.home_score_ht ?? null,
-      awayScoreHt: fixture.away_score_ht ?? null,
-      penaltyShootout: fixture.penalty_shootout ?? null,
-      extraTimeScore: fixture.extra_time_score ?? null,
-      isLocalDerby: fixture.is_local_derby,
-      isNeutralGround: fixture.is_neutral_ground,
-      weatherCode: fixture.weather_code ?? null,
-      weatherDesc: fixture.weather_desc ?? null,
-      windSpeed: fixture.wind_speed ?? null,
-      temperatureC: fixture.temperature_c ?? null,
-      pitchCondition: fixture.pitch_condition ?? null,
-      attendance: fixture.attendance ?? null,
-      liveWebsocket: fixture.live_websocket,
+    update: {
+      status: event.status,
+      period: event.period,
+      currentMinute: event.current_minute,
+      homeScore: event.home_score,
+      awayScore: event.away_score,
+      homeScoreHt: event.home_score_ht,
+      awayScoreHt: event.away_score_ht,
       lastSyncedAt: new Date(),
     },
   });
 }
 
-async function syncFixtureDetails(fixtureId: number): Promise<void> {
-  // Fetch all detail endpoints in parallel
-  const [statsResult, incidentsResult, oddsResult, lineupsResult, playerStatsResult] = await Promise.allSettled([
-    bsdClient.getEventStats(fixtureId),
-    bsdClient.getEventIncidents(fixtureId),
-    bsdClient.getEventOdds(fixtureId),
-    bsdClient.getEventLineups(fixtureId),
-    bsdClient.getEventPlayerStats(fixtureId),
-  ]);
+export async function syncFixtureDetails(fixtureId: number): Promise<void> {
+  console.log(`[Sync] Syncing details for fixture ${fixtureId}...`);
 
-  // Upsert stats
-  if (statsResult.status === 'fulfilled' && statsResult.value) {
-    await upsertFixtureStats(fixtureId, statsResult.value);
-  }
-
-  // Upsert incidents
-  if (incidentsResult.status === 'fulfilled' && incidentsResult.value) {
-    await upsertFixtureIncidents(fixtureId, incidentsResult.value);
-  }
-
-  // Upsert odds
-  if (oddsResult.status === 'fulfilled' && oddsResult.value) {
-    await upsertFixtureOdds(fixtureId, oddsResult.value);
-  }
-
-  // Upsert lineups
-  if (lineupsResult.status === 'fulfilled' && lineupsResult.value) {
-    await upsertFixtureLineup(fixtureId, lineupsResult.value);
-  }
-
-  // Upsert player stats
-  if (playerStatsResult.status === 'fulfilled' && playerStatsResult.value) {
-    await upsertPlayerStats(fixtureId, playerStatsResult.value);
-  }
-}
-
-async function upsertFixtureStats(fixtureId: number, stats: BSDEventStats): Promise<void> {
-  await db.fixtureStats.upsert({
-    where: { fixtureId },
-    update: {
-      homeTotalShots: stats.home.total_shots,
-      homeShotsOnTarget: stats.home.shots_on_target,
-      homeShotsOffTarget: stats.home.shots_off_target,
-      homeBlockedShots: stats.home.blocked_shots,
-      homeShotsInsideBox: stats.home.shots_inside_box,
-      homeShotsOutsideBox: stats.home.shots_outside_box,
-      homeBigChances: stats.home.big_chances,
-      homeBigChancesScored: stats.home.big_chances_scored,
-      homeBigChancesMissed: stats.home.big_chances_missed,
-      homeHitWoodwork: stats.home.hit_woodwork,
-      homeCornerKicks: stats.home.corner_kicks,
-      homeOffsides: stats.home.offsides,
-      homeBallPossession: stats.home.ball_possession,
-      homePassAccuracy: stats.home.pass_accuracy,
-      homePasses: stats.home.passes,
-      homeAccuratePasses: stats.home.accurate_passes,
-      homeTotalTackles: stats.home.total_tackles,
-      homeInterceptions: stats.home.interceptions,
-      homeClearances: stats.home.clearances,
-      homeDribblesSuccess: stats.home.dribbles_success,
-      homeDribblesTotal: stats.home.dribbles_total,
-      homeAerialDuelsWon: stats.home.aerial_duels_won,
-      homeAerialDuelsTotal: stats.home.aerial_duels_total,
-      homeFouls: stats.home.fouls,
-      homeYellowCards: stats.home.yellow_cards,
-      homeRedCards: stats.home.red_cards,
-      homeAttacks: stats.home.attacks,
-      homeDangerousAttacks: stats.home.dangerous_attacks,
-      homeExpectedGoals: stats.home.expected_goals,
-      homeGoalsPrevented: stats.home.goals_prevented,
-      awayTotalShots: stats.away.total_shots,
-      awayShotsOnTarget: stats.away.shots_on_target,
-      awayShotsOffTarget: stats.away.shots_off_target,
-      awayBlockedShots: stats.away.blocked_shots,
-      awayShotsInsideBox: stats.away.shots_inside_box,
-      awayShotsOutsideBox: stats.away.shots_outside_box,
-      awayBigChances: stats.away.big_chances,
-      awayBigChancesScored: stats.away.big_chances_scored,
-      awayBigChancesMissed: stats.away.big_chances_missed,
-      awayHitWoodwork: stats.away.hit_woodwork,
-      awayCornerKicks: stats.away.corner_kicks,
-      awayOffsides: stats.away.offsides,
-      awayBallPossession: stats.away.ball_possession,
-      awayPassAccuracy: stats.away.pass_accuracy,
-      awayPasses: stats.away.passes,
-      awayAccuratePasses: stats.away.accurate_passes,
-      awayTotalTackles: stats.away.total_tackles,
-      awayInterceptions: stats.away.interceptions,
-      awayClearances: stats.away.clearances,
-      awayDribblesSuccess: stats.away.dribbles_success,
-      awayDribblesTotal: stats.away.dribbles_total,
-      awayAerialDuelsWon: stats.away.aerial_duels_won,
-      awayAerialDuelsTotal: stats.away.aerial_duels_total,
-      awayFouls: stats.away.fouls,
-      awayYellowCards: stats.away.yellow_cards,
-      awayRedCards: stats.away.red_cards,
-      awayAttacks: stats.away.attacks,
-      awayDangerousAttacks: stats.away.dangerous_attacks,
-      awayExpectedGoals: stats.away.expected_goals,
-      awayGoalsPrevented: stats.away.goals_prevented,
-    },
-    create: {
-      fixtureId,
-      homeTotalShots: stats.home.total_shots,
-      homeShotsOnTarget: stats.home.shots_on_target,
-      homeShotsOffTarget: stats.home.shots_off_target,
-      homeBlockedShots: stats.home.blocked_shots,
-      homeShotsInsideBox: stats.home.shots_inside_box,
-      homeShotsOutsideBox: stats.home.shots_outside_box,
-      homeBigChances: stats.home.big_chances,
-      homeBigChancesScored: stats.home.big_chances_scored,
-      homeBigChancesMissed: stats.home.big_chances_missed,
-      homeHitWoodwork: stats.home.hit_woodwork,
-      homeCornerKicks: stats.home.corner_kicks,
-      homeOffsides: stats.home.offsides,
-      homeBallPossession: stats.home.ball_possession,
-      homePassAccuracy: stats.home.pass_accuracy,
-      homePasses: stats.home.passes,
-      homeAccuratePasses: stats.home.accurate_passes,
-      homeTotalTackles: stats.home.total_tackles,
-      homeInterceptions: stats.home.interceptions,
-      homeClearances: stats.home.clearances,
-      homeDribblesSuccess: stats.home.dribbles_success,
-      homeDribblesTotal: stats.home.dribbles_total,
-      homeAerialDuelsWon: stats.home.aerial_duels_won,
-      homeAerialDuelsTotal: stats.home.aerial_duels_total,
-      homeFouls: stats.home.fouls,
-      homeYellowCards: stats.home.yellow_cards,
-      homeRedCards: stats.home.red_cards,
-      homeAttacks: stats.home.attacks,
-      homeDangerousAttacks: stats.home.dangerous_attacks,
-      homeExpectedGoals: stats.home.expected_goals,
-      homeGoalsPrevented: stats.home.goals_prevented,
-      awayTotalShots: stats.away.total_shots,
-      awayShotsOnTarget: stats.away.shots_on_target,
-      awayShotsOffTarget: stats.away.shots_off_target,
-      awayBlockedShots: stats.away.blocked_shots,
-      awayShotsInsideBox: stats.away.shots_inside_box,
-      awayShotsOutsideBox: stats.away.shots_outside_box,
-      awayBigChances: stats.away.big_chances,
-      awayBigChancesScored: stats.away.big_chances_scored,
-      awayBigChancesMissed: stats.away.big_chances_missed,
-      awayHitWoodwork: stats.away.hit_woodwork,
-      awayCornerKicks: stats.away.corner_kicks,
-      awayOffsides: stats.away.offsides,
-      awayBallPossession: stats.away.ball_possession,
-      awayPassAccuracy: stats.away.pass_accuracy,
-      awayPasses: stats.away.passes,
-      awayAccuratePasses: stats.away.accurate_passes,
-      awayTotalTackles: stats.away.total_tackles,
-      awayInterceptions: stats.away.interceptions,
-      awayClearances: stats.away.clearances,
-      awayDribblesSuccess: stats.away.dribbles_success,
-      awayDribblesTotal: stats.away.dribbles_total,
-      awayAerialDuelsWon: stats.away.aerial_duels_won,
-      awayAerialDuelsTotal: stats.away.aerial_duels_total,
-      awayFouls: stats.away.fouls,
-      awayYellowCards: stats.away.yellow_cards,
-      awayRedCards: stats.away.red_cards,
-      awayAttacks: stats.away.attacks,
-      awayDangerousAttacks: stats.away.dangerous_attacks,
-      awayExpectedGoals: stats.away.expected_goals,
-      awayGoalsPrevented: stats.away.goals_prevented,
-    },
-  });
-}
-
-async function upsertFixtureIncidents(fixtureId: number, incidents: BSDIncident[]): Promise<void> {
-  // Delete existing incidents and re-insert (simpler than trying to deduplicate by ID)
-  await db.fixtureIncident.deleteMany({ where: { fixtureId } });
-
-  if (incidents.length === 0) return;
-
-  await db.fixtureIncident.createMany({
-    data: incidents.map((inc) => ({
-      fixtureId,
-      type: inc.type,
-      minute: inc.minute,
-      addedTime: inc.added_time ?? null,
-      player: inc.player ?? null,
-      playerId: inc.player_id ?? null,
-      playerIn: inc.player_in ?? null,
-      playerInId: inc.player_in_id ?? null,
-      playerOut: inc.player_out ?? null,
-      playerOutId: inc.player_out_id ?? null,
-      isHome: inc.is_home ?? null,
-      cardType: inc.card_type ?? null,
-      goalType: inc.goal_type ?? null,
-      decision: inc.decision ?? null,
-      confirmed: inc.confirmed ?? null,
-      homeScore: inc.home_score ?? null,
-      awayScore: inc.away_score ?? null,
-    })),
-  });
-}
-
-async function upsertFixtureOdds(fixtureId: number, oddsData: BSDOdds): Promise<void> {
-  // Extract key odds from the markets
-  let homeWin: number | null = null;
-  let draw: number | null = null;
-  let awayWin: number | null = null;
-  let over15: number | null = null;
-  let over25: number | null = null;
-  let over35: number | null = null;
-  let under15: number | null = null;
-  let under25: number | null = null;
-  let under35: number | null = null;
-  let bttsYes: number | null = null;
-  let bttsNo: number | null = null;
-
-  for (const market of oddsData.markets) {
-    // Match result (1X2)
-    if (market.key === '1x2' || market.name?.toLowerCase().includes('match result')) {
-      for (const outcome of market.outcomes) {
-        const name = outcome.name.toLowerCase();
-        if (name === '1' || name === 'home' || name.includes('home win')) {
-          homeWin = outcome.odds;
-        } else if (name === 'x' || name === 'draw') {
-          draw = outcome.odds;
-        } else if (name === '2' || name === 'away' || name.includes('away win')) {
-          awayWin = outcome.odds;
-        }
-      }
+  try {
+    // Sync stats
+    const stats = await bsdClient.getEventStats(fixtureId);
+    if (stats.stats?.home && stats.stats?.away) {
+      const home = stats.stats.home as Record<string, unknown>;
+      const away = stats.stats.away as Record<string, unknown>;
+      await db.fixtureStats.upsert({
+        where: { fixtureId },
+        create: {
+          fixtureId,
+          homeTotalShots: (home.total_shots as number) ?? 0,
+          homeShotsOnTarget: (home.shots_on_target as number) ?? 0,
+          homeBallPossession: (home.ball_possession as number) ?? 50,
+          homeExpectedGoals: (home.expected_goals as number) ?? (home.xg as Record<string, unknown>)?.actual as number ?? 0,
+          homeCornerKicks: (home.corner_kicks as number) ?? 0,
+          homeFouls: (home.fouls as number) ?? 0,
+          homeYellowCards: (home.yellow_cards as number) ?? 0,
+          homeRedCards: (home.red_cards as number) ?? 0,
+          homeAttacks: (home.attack as number) ?? 0,
+          homeDangerousAttacks: (home.dangerous_attack as number) ?? 0,
+          awayTotalShots: (away.total_shots as number) ?? 0,
+          awayShotsOnTarget: (away.shots_on_target as number) ?? 0,
+          awayBallPossession: (away.ball_possession as number) ?? 50,
+          awayExpectedGoals: (away.expected_goals as number) ?? (away.xg as Record<string, unknown>)?.actual as number ?? 0,
+          awayCornerKicks: (away.corner_kicks as number) ?? 0,
+          awayFouls: (away.fouls as number) ?? 0,
+          awayYellowCards: (away.yellow_cards as number) ?? 0,
+          awayRedCards: (away.red_cards as number) ?? 0,
+          awayAttacks: (away.attack as number) ?? 0,
+          awayDangerousAttacks: (away.dangerous_attack as number) ?? 0,
+        },
+        update: {
+          homeTotalShots: (home.total_shots as number) ?? 0,
+          homeShotsOnTarget: (home.shots_on_target as number) ?? 0,
+          homeBallPossession: (home.ball_possession as number) ?? 50,
+          homeExpectedGoals: (home.expected_goals as number) ?? 0,
+          awayTotalShots: (away.total_shots as number) ?? 0,
+          awayShotsOnTarget: (away.shots_on_target as number) ?? 0,
+          awayBallPossession: (away.ball_possession as number) ?? 50,
+          awayExpectedGoals: (away.expected_goals as number) ?? 0,
+        },
+      });
     }
+  } catch { /* Stats might not be available */ }
 
-    // Over/Under
-    if (market.key?.includes('over_under') || market.name?.toLowerCase().includes('over/under')) {
-      for (const outcome of market.outcomes) {
-        const name = outcome.name.toLowerCase();
-        if (name.includes('over 1.5') || name === 'o1.5') over15 = outcome.odds;
-        if (name.includes('over 2.5') || name === 'o2.5') over25 = outcome.odds;
-        if (name.includes('over 3.5') || name === 'o3.5') over35 = outcome.odds;
-        if (name.includes('under 1.5') || name === 'u1.5') under15 = outcome.odds;
-        if (name.includes('under 2.5') || name === 'u2.5') under25 = outcome.odds;
-        if (name.includes('under 3.5') || name === 'u3.5') under35 = outcome.odds;
-      }
+  try {
+    // Sync odds
+    const odds = await bsdClient.getEventOdds(fixtureId);
+    if (odds.odds) {
+      await db.fixtureOdds.upsert({
+        where: { fixtureId },
+        create: {
+          fixtureId,
+          homeWin: odds.odds.home_win,
+          draw: odds.odds.draw,
+          awayWin: odds.odds.away_win,
+          over15Goals: odds.odds.over_15_goals,
+          over25Goals: odds.odds.over_25_goals,
+          over35Goals: odds.odds.over_35_goals,
+          under15Goals: odds.odds.under_15_goals,
+          under25Goals: odds.odds.under_25_goals,
+          under35Goals: odds.odds.under_35_goals,
+          bttsYes: odds.odds.btts_yes,
+          bttsNo: odds.odds.btts_no,
+        },
+        update: {
+          homeWin: odds.odds.home_win,
+          draw: odds.odds.draw,
+          awayWin: odds.odds.away_win,
+          over25Goals: odds.odds.over_25_goals,
+          bttsYes: odds.odds.btts_yes,
+        },
+      });
     }
+  } catch { /* Odds might not be available */ }
 
-    // BTTS
-    if (market.key?.includes('btts') || market.name?.toLowerCase().includes('both teams to score')) {
-      for (const outcome of market.outcomes) {
-        const name = outcome.name.toLowerCase();
-        if (name === 'yes' || name.includes('yes')) bttsYes = outcome.odds;
-        if (name === 'no' || name.includes('no')) bttsNo = outcome.odds;
-      }
-    }
-  }
-
-  await db.fixtureOdds.upsert({
-    where: { fixtureId },
-    update: {
-      homeWin,
-      draw,
-      awayWin,
-      over15Goals: over15,
-      over25Goals: over25,
-      over35Goals: over35,
-      under15Goals: under15,
-      under25Goals: under25,
-      under35Goals: under35,
-      bttsYes,
-      bttsNo,
-      observedAt: new Date(),
-    },
-    create: {
-      fixtureId,
-      homeWin,
-      draw,
-      awayWin,
-      over15Goals: over15,
-      over25Goals: over25,
-      over35Goals: over35,
-      under15Goals: under15,
-      under25Goals: under25,
-      under35Goals: under35,
-      bttsYes,
-      bttsNo,
-      observedAt: new Date(),
-    },
-  });
-}
-
-async function upsertFixtureLineup(fixtureId: number, lineup: BSDLineup): Promise<void> {
-  await db.fixtureLineup.upsert({
-    where: { fixtureId },
-    update: {
-      lineupStatus: lineup.lineup_status,
-      homeFormation: lineup.home.formation ?? '',
-      awayFormation: lineup.away.formation ?? '',
-      homePlayers: JSON.stringify(lineup.home.players ?? []),
-      awayPlayers: JSON.stringify(lineup.away.players ?? []),
-      homeSubstitutes: JSON.stringify(lineup.home.substitutes ?? []),
-      awaySubstitutes: JSON.stringify(lineup.away.substitutes ?? []),
-      homeUnavailable: JSON.stringify(lineup.home.unavailable ?? []),
-      awayUnavailable: JSON.stringify(lineup.away.unavailable ?? []),
-      homeConfidence: lineup.home.confidence ?? null,
-      awayConfidence: lineup.away.confidence ?? null,
-      updatedAt: new Date(),
-    },
-    create: {
-      fixtureId,
-      lineupStatus: lineup.lineup_status,
-      homeFormation: lineup.home.formation ?? '',
-      awayFormation: lineup.away.formation ?? '',
-      homePlayers: JSON.stringify(lineup.home.players ?? []),
-      awayPlayers: JSON.stringify(lineup.away.players ?? []),
-      homeSubstitutes: JSON.stringify(lineup.home.substitutes ?? []),
-      awaySubstitutes: JSON.stringify(lineup.away.substitutes ?? []),
-      homeUnavailable: JSON.stringify(lineup.home.unavailable ?? []),
-      awayUnavailable: JSON.stringify(lineup.away.unavailable ?? []),
-      homeConfidence: lineup.home.confidence ?? null,
-      awayConfidence: lineup.away.confidence ?? null,
-    },
-  });
-}
-
-async function upsertPlayerStats(fixtureId: number, playerStats: BSDPlayerStat[]): Promise<void> {
-  // Delete existing and re-insert
-  await db.playerMatchStat.deleteMany({ where: { fixtureId } });
-
-  if (playerStats.length === 0) return;
-
-  // Upsert players first
-  for (const ps of playerStats) {
-    await db.player.upsert({
-      where: { id: ps.player_id },
-      update: { name: ps.name, position: ps.position },
-      create: { id: ps.player_id, name: ps.name, position: ps.position },
-    }).catch(() => {
-      // Ignore errors if player already exists with different data
+  try {
+    // Sync lineups
+    const lineups = await bsdClient.getEventLineups(fixtureId);
+    await db.fixtureLineup.upsert({
+      where: { fixtureId },
+      create: {
+        fixtureId,
+        lineupStatus: lineups.lineup_status,
+        homeFormation: lineups.lineups?.home?.formation ?? '',
+        awayFormation: lineups.lineups?.away?.formation ?? '',
+        homePlayers: JSON.stringify(lineups.lineups?.home?.players ?? []),
+        awayPlayers: JSON.stringify(lineups.lineups?.away?.players ?? []),
+        homeSubstitutes: JSON.stringify(lineups.lineups?.home?.substitutes ?? []),
+        awaySubstitutes: JSON.stringify(lineups.lineups?.away?.substitutes ?? []),
+        homeUnavailable: JSON.stringify(lineups.unavailable_players?.home ?? []),
+        awayUnavailable: JSON.stringify(lineups.unavailable_players?.away ?? []),
+        homeConfidence: lineups.lineups?.home?.confidence,
+        awayConfidence: lineups.lineups?.away?.confidence,
+        updatedAt: lineups.updated_at ? new Date(lineups.updated_at) : null,
+      },
+      update: {
+        lineupStatus: lineups.lineup_status,
+        homeFormation: lineups.lineups?.home?.formation ?? '',
+        awayFormation: lineups.lineups?.away?.formation ?? '',
+        homePlayers: JSON.stringify(lineups.lineups?.home?.players ?? []),
+        awayPlayers: JSON.stringify(lineups.lineups?.away?.players ?? []),
+        updatedAt: lineups.updated_at ? new Date(lineups.updated_at) : null,
+      },
     });
-  }
+  } catch { /* Lineups might not be available */ }
 
-  await db.playerMatchStat.createMany({
-    data: playerStats.map((ps) => ({
-      fixtureId,
-      playerId: ps.player_id,
-      teamId: ps.team_id,
-      minutesPlayed: ps.minutes_played,
-      rating: ps.rating,
-      goals: ps.goals,
-      goalAssist: ps.goal_assist,
-      expectedGoals: ps.expected_goals,
-      expectedAssists: ps.expected_assists,
-      totalShots: ps.total_shots,
-      shotsOnTarget: ps.shots_on_target,
-      totalPass: ps.total_pass,
-      accuratePass: ps.accurate_pass,
-      keyPass: ps.key_pass,
-      totalTackle: ps.total_tackle,
-      interception: ps.interception,
-      yellowCard: ps.yellow_card,
-      redCard: ps.red_card,
-      saves: ps.saves,
-    })),
-  });
+  try {
+    // Sync incidents
+    const incidents = await bsdClient.getEventIncidents(fixtureId);
+    if (incidents.incidents?.length) {
+      // Delete old and re-insert
+      await db.fixtureIncident.deleteMany({ where: { fixtureId } });
+      for (const inc of incidents.incidents) {
+        await db.fixtureIncident.create({
+          data: {
+            fixtureId,
+            type: inc.type,
+            minute: inc.minute,
+            addedTime: inc.added_time,
+            player: inc.player,
+            playerId: inc.player_id,
+            playerIn: inc.player_in,
+            playerInId: inc.player_in_id,
+            playerOut: inc.player_out,
+            playerOutId: inc.player_out_id,
+            isHome: inc.is_home,
+            cardType: inc.card_type,
+            goalType: inc.goal_type,
+            decision: inc.decision,
+            confirmed: inc.confirmed,
+            homeScore: inc.home_score,
+            awayScore: inc.away_score,
+          },
+        });
+      }
+    }
+  } catch { /* Incidents might not be available */ }
+
+  try {
+    // Sync metadata
+    const meta = await bsdClient.getEventMetadata(fixtureId);
+    await db.fixtureMetadata.upsert({
+      where: { fixtureId },
+      create: {
+        fixtureId,
+        funFacts: JSON.stringify(meta.funfacts ?? []),
+        aiPreview: meta.ai_preview?.text ?? '',
+        aiGeneratedAt: meta.ai_preview?.generated_at ? new Date(meta.ai_preview.generated_at) : null,
+      },
+      update: {
+        funFacts: JSON.stringify(meta.funfacts ?? []),
+        aiPreview: meta.ai_preview?.text ?? '',
+      },
+    });
+  } catch { /* Metadata might not be available */ }
 }
 
-// ============================================================================
-// SYNC TEAM FIXTURES (for building Team DNA)
-// ============================================================================
-
-export async function syncTeamFixtures(teamId: number): Promise<{ fixtures: number }> {
-  console.log(`[Sync] Starting team fixtures sync for team ${teamId}...`);
-  let fixtureCount = 0;
-
-  // Fetch recent fixtures — last 6 months
-  const dateTo = new Date().toISOString().split('T')[0];
-  const dateFrom = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
+export async function syncManagers(): Promise<number> {
+  console.log('[Sync] Syncing managers...');
+  let synced = 0;
   let offset = 0;
-  const limit = 50;
-  let hasMore = true;
+  const limit = 200;
 
-  while (hasMore) {
-    const response = await bsdClient.getTeamFixtures(teamId, {
-      date_from: dateFrom,
-      date_to: dateTo,
-      limit,
-      offset,
-    });
-
-    for (const fixture of response.results) {
-      await upsertFixture(fixture);
-      fixtureCount++;
-
-      // Fetch details for finished matches
-      if (fixture.status === 'finished' || fixture.status === 'FT') {
-        try {
-          await syncFixtureDetails(fixture.id);
-        } catch (error) {
-          console.error(`[Sync] Error fetching details for team fixture ${fixture.id}:`, error);
-        }
-      }
+  while (true) {
+    const data = await bsdClient.getManagers({ limit, offset });
+    for (const m of data.results) {
+      await db.manager.upsert({
+        where: { id: m.id },
+        create: {
+          id: m.id,
+          name: m.name,
+          shortName: m.short_name,
+          country: m.country,
+          tacticalProfile: m.tactical_profile || 'balanced',
+          preferredFormation: m.preferred_formation || '',
+          currentTeamId: m.current_team_id,
+          matchesTotal: m.matches_total ?? 0,
+          wins: m.wins ?? 0,
+          draws: m.draws ?? 0,
+          losses: m.losses ?? 0,
+          winPct: m.win_pct ?? 0,
+          avgGoalsScored: m.avg_goals_scored ?? 0,
+          avgGoalsConceded: m.avg_goals_conceded ?? 0,
+          avgPossession: m.avg_possession ?? 50,
+          cleanSheetPct: m.clean_sheet_pct ?? 0,
+          bttsPct: m.btts_pct ?? 0,
+          over25Pct: m.over_25_pct ?? 0,
+          teamStyle: m.team_style ?? '',
+          statsUpdatedAt: new Date(),
+        },
+        update: {
+          tacticalProfile: m.tactical_profile ?? 'balanced',
+          preferredFormation: m.preferred_formation ?? '',
+          currentTeamId: m.current_team_id,
+          matchesTotal: m.matches_total ?? 0,
+          wins: m.wins ?? 0,
+          draws: m.draws ?? 0,
+          losses: m.losses ?? 0,
+          winPct: m.win_pct ?? 0,
+          avgGoalsScored: m.avg_goals_scored ?? 0,
+          avgGoalsConceded: m.avg_goals_conceded ?? 0,
+          avgPossession: m.avg_possession ?? 50,
+          cleanSheetPct: m.clean_sheet_pct ?? 0,
+          bttsPct: m.btts_pct ?? 0,
+          over25Pct: m.over_25_pct ?? 0,
+          teamStyle: m.team_style ?? '',
+        },
+      });
+      synced++;
     }
-
-    if (response.next) {
-      offset += limit;
-    } else {
-      hasMore = false;
-    }
+    if (!data.next || data.results.length < limit) break;
+    offset += limit;
   }
-
-  console.log(`[Sync] Team fixtures sync complete for team ${teamId}: ${fixtureCount} fixtures`);
-  return { fixtures: fixtureCount };
+  console.log(`[Sync] Synced ${synced} managers`);
+  return synced;
 }
 
-// ============================================================================
-// SYNC MANAGERS
-// ============================================================================
+/** Full daily sync — run this on a schedule */
+export async function fullDailySync(): Promise<{ leagues: number; fixtures: number; standings: number }> {
+  const today = new Date().toISOString().split('T')[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
-export async function syncManagers(params?: { leagueId?: number }): Promise<{ managers: number }> {
-  console.log(`[Sync] Starting manager sync...`);
-  let managerCount = 0;
+  // Sync leagues
+  const leagues = await syncLeagues();
 
-  let offset = 0;
-  const limit = 100;
-  let hasMore = true;
+  // Sync fixtures (yesterday through tomorrow for live + recent results + upcoming)
+  const fixtures = await syncFixtures({ dateFrom: yesterday, dateTo: tomorrow });
 
-  while (hasMore) {
-    const response = await bsdClient.getManagers({
-      league_id: params?.leagueId,
-      limit,
-      offset,
-    });
-    console.log(`[Sync] Fetched ${response.results.length} managers (offset: ${offset})`);
-
-    for (const manager of response.results) {
-      await upsertManager(manager);
-      managerCount++;
-    }
-
-    if (response.next) {
-      offset += limit;
-    } else {
-      hasMore = false;
-    }
+  // Sync standings for top leagues
+  const topLeagues = [17, 3, 9, 6, 13, 14, 30, 29, 34, 8]; // EPL, La Liga, Serie A, Ligue 1, etc.
+  let standings = 0;
+  for (const lid of topLeagues) {
+    standings += await syncStandings(lid);
   }
 
-  console.log(`[Sync] Manager sync complete: ${managerCount} managers`);
-  return { managers: managerCount };
-}
+  // Sync managers
+  await syncManagers();
 
-async function upsertManager(manager: BSDManager): Promise<void> {
-  await db.manager.upsert({
-    where: { id: manager.id },
-    update: {
-      name: manager.name,
-      shortName: manager.short_name ?? '',
-      country: manager.country?.name ?? '',
-      tacticalProfile: manager.tactical_profile ?? 'balanced',
-      preferredFormation: manager.preferred_formation ?? '',
-      currentTeamId: manager.current_team?.id ?? null,
-      matchesTotal: manager.matches_total,
-      wins: manager.wins,
-      draws: manager.draws,
-      losses: manager.losses,
-      winPct: manager.win_pct,
-      avgGoalsScored: manager.avg_goals_scored,
-      avgGoalsConceded: manager.avg_goals_conceded,
-      avgPossession: manager.avg_possession,
-      cleanSheetPct: manager.clean_sheet_pct,
-      bttsPct: manager.btts_pct,
-      over25Pct: manager.over25_pct,
-      teamStyle: manager.team_style ?? '',
-      statsUpdatedAt: new Date(),
-    },
-    create: {
-      id: manager.id,
-      name: manager.name,
-      shortName: manager.short_name ?? '',
-      country: manager.country?.name ?? '',
-      tacticalProfile: manager.tactical_profile ?? 'balanced',
-      preferredFormation: manager.preferred_formation ?? '',
-      currentTeamId: manager.current_team?.id ?? null,
-      matchesTotal: manager.matches_total,
-      wins: manager.wins,
-      draws: manager.draws,
-      losses: manager.losses,
-      winPct: manager.win_pct,
-      avgGoalsScored: manager.avg_goals_scored,
-      avgGoalsConceded: manager.avg_goals_conceded,
-      avgPossession: manager.avg_possession,
-      cleanSheetPct: manager.clean_sheet_pct,
-      bttsPct: manager.btts_pct,
-      over25Pct: manager.over25_pct,
-      teamStyle: manager.team_style ?? '',
-    },
+  // Sync details for today's finished matches
+  const finishedToday = await db.fixture.findMany({
+    where: { status: 'finished', eventDate: { gte: new Date(yesterday) } },
+    take: 50,
   });
+  for (const f of finishedToday) {
+    await syncFixtureDetails(f.id);
+  }
+
+  return { leagues, fixtures, standings };
 }

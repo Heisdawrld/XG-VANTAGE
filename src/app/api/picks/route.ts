@@ -19,7 +19,7 @@ export async function GET(request: Request) {
           eventDate: { gte: today, lt: tomorrow },
           status: 'notstarted',
         },
-        confidence: { gte: 0.55 },
+        confidence: { gte: 0.25 },
       },
       include: {
         fixture: {
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
             eventDate: { gte: today, lt: tomorrow },
             status: 'notstarted',
           },
-          confidence: { gte: 0.55 },
+          confidence: { gte: 0.25 },
         },
         include: {
           fixture: {

@@ -31,6 +31,7 @@ export async function GET(request: Request) {
     include: {
       homeTeam: true,
       awayTeam: true,
+      league: true,
       odds: true,
       prediction: true,
       lineup: true,
@@ -67,9 +68,16 @@ export async function GET(request: Request) {
     if (group) group.leagueName = league.name;
   }
 
+  // Build league name map for frontend
+  const leagueMap: Record<number, string> = {};
+  for (const league of leagues) {
+    leagueMap[league.id] = league.name;
+  }
+
   return NextResponse.json({
     count: fixtures.length,
     grouped: Object.fromEntries(grouped),
+    leagueMap,
     fixtures,
   });
 }

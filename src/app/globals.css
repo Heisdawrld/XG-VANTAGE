@@ -65,3 +65,19 @@ body { background: var(--bg-primary); }
 
 /* Bottom nav safe area */
 .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* Match detail overlay smooth scroll */
+.match-detail-scroll {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* Confidence ring animation */
+@keyframes ring-fill {
+  from { stroke-dashoffset: 175.9; }
+}
+
+/* Glow effect for value detection */
+.value-glow {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.15);
+}

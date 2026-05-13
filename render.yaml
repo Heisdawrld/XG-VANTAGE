@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: xg-vantage
+    runtime: node
+    plan: starter
+    buildCommand: bun install && bun run db:generate && bun run build
+    startCommand: bun run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: xg-vantage-db
+          property: connectionString
+      - key: BSD_API_KEY
+        sync: false
+      - key: NEXTAUTH_SECRET
+        generateValue: true
+      - key: NEXTAUTH_URL
+        value: https://xg-vantage.onrender.com
+      - key: PORT
+        value: "3000"
+
+databases:
+  - name: xg-vantage-db
+    databaseName: xg_vantage
+    plan: starter

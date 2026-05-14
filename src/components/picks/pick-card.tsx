@@ -60,10 +60,7 @@ export function PickCard({ pick, onSelect }: PickCardProps) {
           {/* Prediction */}
           <div className="flex items-center gap-2 mb-2">
             <span className="text-xs font-semibold text-[#10e774]">
-              {pick.pickLabel || pick.recommendedBet || (
-                pick.predictedResult === 'H' ? 'Home Win' :
-                pick.predictedResult === 'A' ? 'Away Win' : 'Draw'
-              )}
+              {pick.pickLabel || pick.recommendedBet || 'Home Win'}
             </span>
             {getTierBadge(pick.tier)}
           </div>

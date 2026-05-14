@@ -1,11 +1,5 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-
-export function ApiClient() {
-  return null;
-}
-
 const API_BASE = '';
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

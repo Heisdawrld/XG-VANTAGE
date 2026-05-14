@@ -2,8 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Star, BarChart3, MessageCircle, RefreshCw } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { Search, Star, BarChart3, MessageCircle } from 'lucide-react';
 import { Navbar } from '@/components/layout/navbar';
 import { BottomNav } from '@/components/layout/bottom-nav';
 import { DateSelector } from '@/components/match/date-selector';
@@ -16,7 +15,6 @@ import { api, type FixtureData, type PickData } from '@/lib/api-client';
 import Link from 'next/link';
 
 export default function HomePage() {
-  const router = useRouter();
   const { user, initialize, isAuthenticated } = useAuthStore();
   const { activeDate, searchQuery, setSearchQuery } = useUIStore();
   const [fixtures, setFixtures] = useState<FixtureData[]>([]);
@@ -237,12 +235,12 @@ export default function HomePage() {
       </main>
 
       {/* Floating Chat Button */}
-      <button
-        onClick={() => router.push('/simulator')}
+      <Link
+        href="/picks"
         className="fixed bottom-20 right-4 w-12 h-12 rounded-full gradient-green flex items-center justify-center glow-green z-40 hover:scale-105 transition-transform"
       >
         <MessageCircle className="w-5 h-5 text-[#060a0e]" />
-      </button>
+      </Link>
 
       <BottomNav />
     </div>

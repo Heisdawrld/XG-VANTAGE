@@ -32,9 +32,6 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grosk:wght@500;600;700&display=swap" rel="stylesheet" />
-      </head>
       <body className={`${inter.variable} ${spaceGrotesk.variable} font-sans antialiased bg-[#060a0e] text-white`}>
         {children}
         <div className="noise-overlay" />

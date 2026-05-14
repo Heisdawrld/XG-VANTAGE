@@ -7,7 +7,7 @@ services:
     branch: main
     buildCommand: npm install && npm run build
     startCommand: chmod +x start.sh && bash start.sh
-    healthCheckPath: /api/cron
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production

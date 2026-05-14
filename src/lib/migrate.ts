@@ -1,7 +1,7 @@
 // Database Migration — Creates all tables in Turso
 import { client } from './db-turso';
 
-async function migrate() {
+export async function migrate() {
   console.log('Running migrations...');
 
   await client.execute(`
@@ -344,4 +344,7 @@ async function migrate() {
   console.log('Migrations complete!');
 }
 
-migrate().catch(console.error);
+// Auto-run when executed directly
+if (require.main === module) {
+  migrate().catch(console.error);
+}

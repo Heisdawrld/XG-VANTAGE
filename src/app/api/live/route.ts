@@ -5,7 +5,7 @@ import { client } from '@/lib/db-turso';
 export async function GET() {
   try {
     const liveData = await bsdClient.getLiveEvents();
-    const enrichedEvents = [];
+    const enrichedEvents: Array<Record<string, unknown>> = [];
 
     for (const event of liveData.events) {
       // Get our prediction if exists

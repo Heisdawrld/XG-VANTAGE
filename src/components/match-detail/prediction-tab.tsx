@@ -163,8 +163,8 @@ export function PredictionTab({ fixture, prediction, odds, metadata }: Predictio
         <h3 className="text-xs font-semibold text-[#9ca3af] uppercase tracking-wider mb-3">Key Reasons</h3>
         <div className="space-y-2">
           {[
-            `Strong ${(prediction.predictedResult as string) === 'H' ? 'home' : 'away'} advantage based on form`,
-            `${(homeTeam?.name || 'Home')} xG: ${((prediction.expectedHomeGoals as number) || 0).toFixed(2)} vs ${(awayTeam?.name || 'Away')}: ${((prediction.expectedAwayGoals as number) || 0).toFixed(2)}`,
+            `Strong ${(prediction.pickType as string) === '1' ? 'home' : 'away'} advantage based on form`,
+            `${(homeTeam?.name || 'Home')} xG: ${((prediction.homeXg as number) || 0).toFixed(2)} vs ${(awayTeam?.name || 'Away')}: ${((prediction.awayXg as number) || 0).toFixed(2)}`,
             `Confidence: ${confPct.toFixed(0)}% — ${verdict.toLowerCase()} signal`,
             valueDetected ? 'Value detected against market odds' : null,
           ].filter(Boolean).map((reason, i) => (

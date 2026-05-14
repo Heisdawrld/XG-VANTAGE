@@ -123,10 +123,10 @@ export async function GET(request: Request) {
     const grouped: Record<number, { leagueId: number; leagueName: string; fixtures: typeof fixtures }> = {};
 
     for (const f of fixtures) {
-      if (!leagueMap[f.leagueId as number]) leagueMap[f.leagueId as number] = f.leagueName || `League ${f.leagueId}`;
-      const lid = f.leagueId as number;
+      const lid = Number(f.leagueId);
+      if (!leagueMap[lid]) leagueMap[lid] = (f.leagueName as string) || `League ${lid}`;
       if (!grouped[lid]) {
-        grouped[lid] = { leagueId: lid, leagueName: f.leagueName || '', fixtures: [] };
+        grouped[lid] = { leagueId: lid, leagueName: (f.leagueName as string) || '', fixtures: [] };
       }
       grouped[lid].fixtures.push(f);
     }

@@ -1,6 +1,7 @@
 'use client';
 
 import { ConfidenceRing } from '@/components/shared/confidence-ring';
+import { TeamLogo } from '@/components/ui/team-logo';
 import type { PickData } from '@/lib/api-client';
 
 interface PickCardProps {
@@ -50,11 +51,25 @@ export function PickCard({ pick, onSelect }: PickCardProps) {
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          {/* Match */}
-          <div className="flex items-center gap-1 mb-1">
+          {/* Match with logos */}
+          <div className="flex items-center gap-2 mb-1">
+            <TeamLogo
+              teamId={pick.homeTeamId}
+              name={pick.homeTeam}
+              shortName={pick.homeTeamShortName}
+              logoUrl={pick.homeTeamLogo}
+              size={20}
+            />
             <span className="text-sm font-bold text-white truncate">{pick.homeTeam}</span>
             <span className="text-xs text-[#9ca3af]">vs</span>
             <span className="text-sm font-bold text-white truncate">{pick.awayTeam}</span>
+            <TeamLogo
+              teamId={pick.awayTeamId}
+              name={pick.awayTeam}
+              shortName={pick.awayTeamShortName}
+              logoUrl={pick.awayTeamLogo}
+              size={20}
+            />
           </div>
 
           {/* Prediction */}

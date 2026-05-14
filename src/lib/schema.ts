@@ -185,6 +185,11 @@ export const fixtureStats = sqliteTable('fixture_stats', {
   homeRedCards: integer('home_red_cards').default(0),
   homeAttacks: integer('home_attacks').default(0),
   homeDangerousAttacks: integer('home_dangerous_attacks').default(0),
+  homeBigChances: integer('home_big_chances').default(0),
+  homePasses: integer('home_passes').default(0),
+  homePassAccuracy: real('home_pass_accuracy').default(0),
+  homeTackles: integer('home_tackles').default(0),
+  homeInterceptions: integer('home_interceptions').default(0),
   awayTotalShots: integer('away_total_shots').default(0),
   awayShotsOnTarget: integer('away_shots_on_target').default(0),
   awayBallPossession: real('away_ball_possession').default(50),
@@ -195,6 +200,11 @@ export const fixtureStats = sqliteTable('fixture_stats', {
   awayRedCards: integer('away_red_cards').default(0),
   awayAttacks: integer('away_attacks').default(0),
   awayDangerousAttacks: integer('away_dangerous_attacks').default(0),
+  awayBigChances: integer('away_big_chances').default(0),
+  awayPasses: integer('away_passes').default(0),
+  awayPassAccuracy: real('away_pass_accuracy').default(0),
+  awayTackles: integer('away_tackles').default(0),
+  awayInterceptions: integer('away_interceptions').default(0),
 });
 
 export const fixtureOdds = sqliteTable('fixture_odds', {

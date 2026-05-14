@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { ConfidenceRing } from '@/components/shared/confidence-ring';
+import { TeamLogo } from '@/components/ui/team-logo';
 
 interface MatchCardProps {
   id: number;
-  homeTeam: { name: string; shortName?: string };
-  awayTeam: { name: string; shortName?: string };
+  homeTeam: { id?: number; name: string; shortName?: string; logo?: string };
+  awayTeam: { id?: number; name: string; shortName?: string; logo?: string };
   status: string;
   homeScore: number | null;
   awayScore: number | null;
@@ -42,9 +43,6 @@ export function MatchCard({
     ? new Date(eventDate).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
     : null;
 
-  const shortHome = homeTeam.shortName || homeTeam.name.substring(0, 3).toUpperCase();
-  const shortAway = awayTeam.shortName || awayTeam.name.substring(0, 3).toUpperCase();
-
   return (
     <Link href={`/match/${id}`}>
       <div className="glass-card glass-card-hover rounded-2xl p-4 transition-all cursor-pointer group">
@@ -52,9 +50,13 @@ export function MatchCard({
           {/* Home Team */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-[rgba(255,255,255,0.04)] flex items-center justify-center flex-shrink-0">
-                <span className="text-[10px] font-bold text-[#9ca3af]">{shortHome}</span>
-              </div>
+              <TeamLogo
+                teamId={homeTeam.id}
+                name={homeTeam.name}
+                shortName={homeTeam.shortName}
+                logoUrl={homeTeam.logo}
+                size={28}
+              />
               <span className="text-sm font-semibold text-white truncate">{homeTeam.name}</span>
             </div>
           </div>
@@ -89,9 +91,13 @@ export function MatchCard({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-sm font-semibold text-white truncate">{awayTeam.name}</span>
-              <div className="w-7 h-7 rounded-lg bg-[rgba(255,255,255,0.04)] flex items-center justify-center flex-shrink-0">
-                <span className="text-[10px] font-bold text-[#9ca3af]">{shortAway}</span>
-              </div>
+              <TeamLogo
+                teamId={awayTeam.id}
+                name={awayTeam.name}
+                shortName={awayTeam.shortName}
+                logoUrl={awayTeam.logo}
+                size={28}
+              />
             </div>
           </div>
         </div>

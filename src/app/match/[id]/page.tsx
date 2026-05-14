@@ -11,6 +11,7 @@ import { PitchTab } from '@/components/match-detail/pitch-tab';
 import { LineupsTab } from '@/components/match-detail/lineups-tab';
 import { LeagueTab } from '@/components/match-detail/league-tab';
 import { AIChatTab } from '@/components/match-detail/ai-chat-tab';
+import { TeamLogo } from '@/components/ui/team-logo';
 import { api } from '@/lib/api-client';
 
 type TabId = 'prediction' | 'stats' | 'pitch' | 'lineups' | 'league' | 'chat';
@@ -60,8 +61,8 @@ export default function MatchDetailPage() {
   const lineup = (fixture.lineup || (fixture as Record<string, unknown>).lineup) as Record<string, unknown> | null;
   const odds = (fixture.odds || (fixture as Record<string, unknown>).odds) as Record<string, unknown> | null;
   const metadata = (fixture.metadata || (fixture as Record<string, unknown>).metadata) as Record<string, unknown> | null;
-  const homeTeam = fixture.homeTeam as Record<string, string> | undefined;
-  const awayTeam = fixture.awayTeam as Record<string, string> | undefined;
+  const homeTeam = fixture.homeTeam as Record<string, string | number> | undefined;
+  const awayTeam = fixture.awayTeam as Record<string, string | number> | undefined;
   const isLive = (fixture.status as string) === 'inprogress';
   const isFinished = (fixture.status as string) === 'finished';
 
@@ -86,9 +87,16 @@ export default function MatchDetailPage() {
             <ArrowLeft className="w-5 h-5 text-white" />
           </button>
           <div className="flex-1">
-            {/* Match Header */}
+            {/* Match Header with Team Logos */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 flex-1 min-w-0">
+                <TeamLogo
+                  teamId={homeTeam?.id as number}
+                  name={homeTeam?.name as string}
+                  shortName={homeTeam?.shortName as string}
+                  logoUrl={homeTeam?.logo as string}
+                  size={28}
+                />
                 <span className="text-sm font-bold text-white truncate">{homeTeam?.name || 'Home'}</span>
               </div>
               <div className="px-3 flex-shrink-0 text-center">
@@ -109,6 +117,13 @@ export default function MatchDetailPage() {
               </div>
               <div className="flex items-center gap-2 flex-1 min-w-0 justify-end">
                 <span className="text-sm font-bold text-white truncate">{awayTeam?.name || 'Away'}</span>
+                <TeamLogo
+                  teamId={awayTeam?.id as number}
+                  name={awayTeam?.name as string}
+                  shortName={awayTeam?.shortName as string}
+                  logoUrl={awayTeam?.logo as string}
+                  size={28}
+                />
               </div>
             </div>
             {/* Score */}
@@ -121,6 +136,12 @@ export default function MatchDetailPage() {
                 <span className={`text-xl font-bold ${isLive ? 'text-[#10e774]' : 'text-white'}`}>
                   {(fixture.awayScore as number) ?? '-'}
                 </span>
+              </div>
+            )}
+            {/* League name */}
+            {fixture.leagueName && (
+              <div className="text-center mt-0.5">
+                <span className="text-[10px] text-[rgba(255,255,255,0.3)]">{fixture.leagueName as string}</span>
               </div>
             )}
           </div>

@@ -53,7 +53,7 @@ export async function GET(request: Request) {
       syncFixtureDetails(fixtureId).catch(() => { /* non-blocking */ });
     }
 
-    // Get team names
+    // Get team names and logos
     const homeTeam = await client.execute({ sql: 'SELECT * FROM teams WHERE id = ?', args: [f.home_team_id as number] });
     const awayTeam = await client.execute({ sql: 'SELECT * FROM teams WHERE id = ?', args: [f.away_team_id as number] });
 
@@ -81,17 +81,86 @@ export async function GET(request: Request) {
       args: [f.league_id as number],
     }) : { rows: [] };
 
-    // Get H2H data
+    const homeTeamId = f.home_team_id as number;
+    const awayTeamId = f.away_team_id as number;
+
+    // Get H2H data (last 10 meetings between these two teams)
     const h2hResult = await client.execute({
       sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
-                   f.home_score, f.away_score, f.status, l.name as league_name
+                   f.home_score, f.away_score, f.status, f.league_id, l.name as league_name
             FROM fixtures f
             LEFT JOIN leagues l ON f.league_id = l.id
             WHERE ((f.home_team_id = ? AND f.away_team_id = ?) OR (f.home_team_id = ? AND f.away_team_id = ?))
               AND f.status = 'finished' AND f.home_score IS NOT NULL
             ORDER BY f.event_date DESC LIMIT 10`,
-      args: [f.home_team_id, f.away_team_id, f.away_team_id, f.home_team_id],
+      args: [homeTeamId, awayTeamId, awayTeamId, homeTeamId],
     });
+
+    // Get H2H summary stats
+    let h2hHomeWins = 0, h2hDraws = 0, h2hAwayWins = 0, h2hHomeGoals = 0, h2hAwayGoals = 0;
+    for (const h of h2hResult.rows) {
+      const hs = h.home_score as number;
+      const as_ = h.away_score as number;
+      // Count from perspective of current home team
+      if (h.home_team_id === homeTeamId) {
+        h2hHomeGoals += hs;
+        h2hAwayGoals += as_;
+        if (hs > as_) h2hHomeWins++;
+        else if (hs === as_) h2hDraws++;
+        else h2hAwayWins++;
+      } else {
+        // They were away team in this match
+        h2hHomeGoals += as_;
+        h2hAwayGoals += hs;
+        if (as_ > hs) h2hHomeWins++;
+        else if (as_ === hs) h2hDraws++;
+        else h2hAwayWins++;
+      }
+    }
+
+    // Get last 5 matches for home team
+    const homeLast5 = await client.execute({
+      sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
+                   f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
+                   ht.name as home_team_name, at.name as away_team_name
+            FROM fixtures f
+            LEFT JOIN leagues l ON f.league_id = l.id
+            LEFT JOIN teams ht ON f.home_team_id = ht.id
+            LEFT JOIN teams at ON f.away_team_id = at.id
+            WHERE (f.home_team_id = ? OR f.away_team_id = ?)
+              AND f.status = 'finished' AND f.home_score IS NOT NULL
+              AND f.id != ?
+            ORDER BY f.event_date DESC LIMIT 5`,
+      args: [homeTeamId, homeTeamId, fixtureId],
+    });
+
+    // Get last 5 matches for away team
+    const awayLast5 = await client.execute({
+      sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
+                   f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
+                   ht.name as home_team_name, at.name as away_team_name
+            FROM fixtures f
+            LEFT JOIN leagues l ON f.league_id = l.id
+            LEFT JOIN teams ht ON f.home_team_id = ht.id
+            LEFT JOIN teams at ON f.away_team_id = at.id
+            WHERE (f.home_team_id = ? OR f.away_team_id = ?)
+              AND f.status = 'finished' AND f.home_score IS NOT NULL
+              AND f.id != ?
+            ORDER BY f.event_date DESC LIMIT 5`,
+      args: [awayTeamId, awayTeamId, fixtureId],
+    });
+
+    // Helper to format form result for a team
+    function getFormResult(match: Record<string, unknown>, teamId: number): 'W' | 'D' | 'L' {
+      const hs = match.home_score as number;
+      const as_ = match.away_score as number;
+      const isHome = match.home_team_id === teamId;
+      const teamGoals = isHome ? hs : as_;
+      const oppGoals = isHome ? as_ : hs;
+      if (teamGoals > oppGoals) return 'W';
+      if (teamGoals < oppGoals) return 'L';
+      return 'D';
+    }
 
     // Build prediction object with parsed JSON fields
     let prediction = null;
@@ -164,11 +233,48 @@ export async function GET(request: Request) {
       };
     }
 
+    // Build team profiles if available
+    const homeProfileResult = await client.execute({
+      sql: 'SELECT * FROM team_profiles WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [homeTeamId],
+    });
+    const awayProfileResult = await client.execute({
+      sql: 'SELECT * FROM team_profiles WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [awayTeamId],
+    });
+
+    // Build ELO if available
+    const homeEloResult = await client.execute({
+      sql: 'SELECT * FROM team_elo WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [homeTeamId],
+    });
+    const awayEloResult = await client.execute({
+      sql: 'SELECT * FROM team_elo WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [awayTeamId],
+    });
+
+    const homeTeamData = homeTeam.rows.length > 0 ? {
+      id: homeTeam.rows[0].id,
+      name: homeTeam.rows[0].name,
+      shortName: homeTeam.rows[0].short_name,
+      logo: homeTeam.rows[0].logo,
+      country: homeTeam.rows[0].country,
+    } : { id: homeTeamId, name: 'Unknown', shortName: null, logo: null, country: null };
+
+    const awayTeamData = awayTeam.rows.length > 0 ? {
+      id: awayTeam.rows[0].id,
+      name: awayTeam.rows[0].name,
+      shortName: awayTeam.rows[0].short_name,
+      logo: awayTeam.rows[0].logo,
+      country: awayTeam.rows[0].country,
+    } : { id: awayTeamId, name: 'Unknown', shortName: null, logo: null, country: null };
+
     const fixture = {
       id: f.id,
       bsdId: f.bsd_id,
       leagueId: f.league_id,
       leagueName: leagueResult.rows.length > 0 ? leagueResult.rows[0].name : null,
+      leagueCountry: leagueResult.rows.length > 0 ? leagueResult.rows[0].country : null,
       seasonId: f.season_id,
       homeTeamId: f.home_team_id,
       awayTeamId: f.away_team_id,
@@ -187,8 +293,8 @@ export async function GET(request: Request) {
       weatherDesc: f.weather_desc,
       temperature: f.temperature,
       windSpeed: f.wind_speed,
-      homeTeam: homeTeam.rows.length > 0 ? { id: homeTeam.rows[0].id, name: homeTeam.rows[0].name, shortName: homeTeam.rows[0].short_name } : { id: f.home_team_id, name: 'Unknown' },
-      awayTeam: awayTeam.rows.length > 0 ? { id: awayTeam.rows[0].id, name: awayTeam.rows[0].name, shortName: awayTeam.rows[0].short_name } : { id: f.away_team_id, name: 'Unknown' },
+      homeTeam: homeTeamData,
+      awayTeam: awayTeamData,
       stats: statsResult.rows.length > 0 ? statsResult.rows[0] : null,
       odds,
       lineup,
@@ -211,15 +317,87 @@ export async function GET(request: Request) {
         xgd: s.xgd,
         form: s.form,
       })),
-      h2h: h2hResult.rows.map(h => ({
-        id: h.id,
-        date: h.event_date,
-        homeTeamId: h.home_team_id,
-        awayTeamId: h.away_team_id,
-        homeScore: h.home_score,
-        awayScore: h.away_score,
-        leagueName: h.league_name,
+      // H2H data with summary
+      h2h: {
+        matches: h2hResult.rows.map(h => ({
+          id: h.id,
+          date: h.event_date,
+          homeTeamId: h.home_team_id,
+          awayTeamId: h.away_team_id,
+          homeScore: h.home_score,
+          awayScore: h.away_score,
+          leagueName: h.league_name,
+        })),
+        summary: {
+          totalMatches: h2hResult.rows.length,
+          homeWins: h2hHomeWins,
+          draws: h2hDraws,
+          awayWins: h2hAwayWins,
+          homeGoals: h2hHomeGoals,
+          awayGoals: h2hAwayGoals,
+        },
+      },
+      // Last 5 matches for each team
+      homeLast5: homeLast5.rows.map(m => ({
+        id: m.id,
+        date: m.event_date,
+        homeTeamId: m.home_team_id,
+        awayTeamId: m.away_team_id,
+        homeScore: m.home_score,
+        awayScore: m.away_score,
+        leagueName: m.league_name,
+        homeTeamName: m.home_team_name,
+        awayTeamName: m.away_team_name,
+        result: getFormResult(m, homeTeamId),
       })),
+      awayLast5: awayLast5.rows.map(m => ({
+        id: m.id,
+        date: m.event_date,
+        homeTeamId: m.home_team_id,
+        awayTeamId: m.away_team_id,
+        homeScore: m.home_score,
+        awayScore: m.away_score,
+        leagueName: m.league_name,
+        homeTeamName: m.home_team_name,
+        awayTeamName: m.away_team_name,
+        result: getFormResult(m, awayTeamId),
+      })),
+      // Team profiles
+      homeProfile: homeProfileResult.rows.length > 0 ? {
+        style: homeProfileResult.rows[0].style,
+        form: homeProfileResult.rows[0].form,
+        homeForm: homeProfileResult.rows[0].home_form,
+        awayForm: homeProfileResult.rows[0].away_form,
+        avgGoalsScored: homeProfileResult.rows[0].avg_goals_scored,
+        avgGoalsConceded: homeProfileResult.rows[0].avg_goals_conceded,
+        possession: homeProfileResult.rows[0].possession,
+        cleanSheetPct: homeProfileResult.rows[0].clean_sheet_pct,
+        bttsPct: homeProfileResult.rows[0].btts_pct,
+        over25Pct: homeProfileResult.rows[0].over_25_pct,
+      } : null,
+      awayProfile: awayProfileResult.rows.length > 0 ? {
+        style: awayProfileResult.rows[0].style,
+        form: awayProfileResult.rows[0].form,
+        homeForm: awayProfileResult.rows[0].home_form,
+        awayForm: awayProfileResult.rows[0].away_form,
+        avgGoalsScored: awayProfileResult.rows[0].avg_goals_scored,
+        avgGoalsConceded: awayProfileResult.rows[0].avg_goals_conceded,
+        possession: awayProfileResult.rows[0].possession,
+        cleanSheetPct: awayProfileResult.rows[0].clean_sheet_pct,
+        bttsPct: awayProfileResult.rows[0].btts_pct,
+        over25Pct: awayProfileResult.rows[0].over_25_pct,
+      } : null,
+      // ELO ratings
+      homeElo: homeEloResult.rows.length > 0 ? {
+        overall: homeEloResult.rows[0].elo_rating,
+        home: homeEloResult.rows[0].elo_home_rating,
+        away: homeEloResult.rows[0].elo_away_rating,
+      } : null,
+      awayElo: awayEloResult.rows.length > 0 ? {
+        overall: awayEloResult.rows[0].elo_rating,
+        home: awayEloResult.rows[0].elo_home_rating,
+        away: awayEloResult.rows[0].elo_away_rating,
+      } : null,
     };
 
     return NextResponse.json({

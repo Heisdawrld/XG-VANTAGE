@@ -210,6 +210,11 @@ export async function migrate() {
       home_red_cards INTEGER DEFAULT 0,
       home_attacks INTEGER DEFAULT 0,
       home_dangerous_attacks INTEGER DEFAULT 0,
+      home_big_chances INTEGER DEFAULT 0,
+      home_passes INTEGER DEFAULT 0,
+      home_pass_accuracy REAL DEFAULT 0,
+      home_tackles INTEGER DEFAULT 0,
+      home_interceptions INTEGER DEFAULT 0,
       away_total_shots INTEGER DEFAULT 0,
       away_shots_on_target INTEGER DEFAULT 0,
       away_ball_possession REAL DEFAULT 50,
@@ -219,7 +224,12 @@ export async function migrate() {
       away_yellow_cards INTEGER DEFAULT 0,
       away_red_cards INTEGER DEFAULT 0,
       away_attacks INTEGER DEFAULT 0,
-      away_dangerous_attacks INTEGER DEFAULT 0
+      away_dangerous_attacks INTEGER DEFAULT 0,
+      away_big_chances INTEGER DEFAULT 0,
+      away_passes INTEGER DEFAULT 0,
+      away_pass_accuracy REAL DEFAULT 0,
+      away_tackles INTEGER DEFAULT 0,
+      away_interceptions INTEGER DEFAULT 0
     );
   `);
 
@@ -339,6 +349,37 @@ export async function migrate() {
 
   for (const sql of indexes) {
     await client.execute(sql);
+  }
+
+  // Safe ALTER TABLE migrations for existing databases
+  const alterMigrations = [
+    // fixture_stats: add new columns if they don't exist
+    { table: 'fixture_stats', column: 'home_big_chances', sql: "ALTER TABLE fixture_stats ADD COLUMN home_big_chances INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'home_passes', sql: "ALTER TABLE fixture_stats ADD COLUMN home_passes INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'home_pass_accuracy', sql: "ALTER TABLE fixture_stats ADD COLUMN home_pass_accuracy REAL DEFAULT 0" },
+    { table: 'fixture_stats', column: 'home_tackles', sql: "ALTER TABLE fixture_stats ADD COLUMN home_tackles INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'home_interceptions', sql: "ALTER TABLE fixture_stats ADD COLUMN home_interceptions INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'away_big_chances', sql: "ALTER TABLE fixture_stats ADD COLUMN away_big_chances INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'away_passes', sql: "ALTER TABLE fixture_stats ADD COLUMN away_passes INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'away_pass_accuracy', sql: "ALTER TABLE fixture_stats ADD COLUMN away_pass_accuracy REAL DEFAULT 0" },
+    { table: 'fixture_stats', column: 'away_tackles', sql: "ALTER TABLE fixture_stats ADD COLUMN away_tackles INTEGER DEFAULT 0" },
+    { table: 'fixture_stats', column: 'away_interceptions', sql: "ALTER TABLE fixture_stats ADD COLUMN away_interceptions INTEGER DEFAULT 0" },
+  ];
+
+  for (const migration of alterMigrations) {
+    try {
+      // Check if column exists
+      const colCheck = await client.execute({
+        sql: "SELECT name FROM pragma_table_info(?) WHERE name = ?",
+        args: [migration.table, migration.column],
+      });
+      if (colCheck.rows.length === 0) {
+        await client.execute(migration.sql);
+        console.log(`[Migration] Added column ${migration.column} to ${migration.table}`);
+      }
+    } catch {
+      // Column might already exist or table might not exist yet — safe to ignore
+    }
   }
 
   console.log('Migrations complete!');

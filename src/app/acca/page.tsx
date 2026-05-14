@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { BottomNav } from '@/components/layout/bottom-nav';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfidenceRing } from '@/components/shared/confidence-ring';
+import { TeamLogo } from '@/components/ui/team-logo';
 import { api, type PickData } from '@/lib/api-client';
 
 export default function AccaPage() {
@@ -102,8 +103,10 @@ export default function AccaPage() {
                       </div>
                       <ConfidenceRing confidence={pick.confidence * 100} size={36} />
                     </div>
-                    <p className="text-sm font-bold text-white mb-1">
+                    <p className="text-sm font-bold text-white mb-1 flex items-center gap-2">
+                      <TeamLogo teamId={pick.homeTeamId} name={pick.homeTeam} shortName={pick.homeTeamShortName} logoUrl={pick.homeTeamLogo} size={18} />
                       {pick.homeTeam} vs {pick.awayTeam}
+                      <TeamLogo teamId={pick.awayTeamId} name={pick.awayTeam} shortName={pick.awayTeamShortName} logoUrl={pick.awayTeamLogo} size={18} />
                     </p>
                     <p className="text-xs font-semibold text-[#10e774]">
                       {pick.pickLabel || pick.recommendedBet || 'Home Win'}

@@ -50,15 +50,26 @@ export async function syncStandings(leagueId: number): Promise<number> {
         sql: 'SELECT id FROM teams WHERE id = ?',
         args: [s.team_id],
       });
+      // Try to fetch more team data from BSD API (short_name, country)
+      let teamShortName = s.team_name?.substring(0, 3)?.toUpperCase() || null;
+      let teamCountry = null;
+      try {
+        const teamData = await bsdClient.getTeams({ name: s.team_name, limit: 1 });
+        if (teamData.results.length > 0) {
+          teamShortName = teamData.results[0].short_name || teamShortName;
+          teamCountry = teamData.results[0].country || null;
+        }
+      } catch { /* silent */ }
+
       if (existingTeam.rows.length === 0) {
         await client.execute({
-          sql: 'INSERT INTO teams (id, name) VALUES (?, ?)',
-          args: [s.team_id, s.team_name],
+          sql: 'INSERT INTO teams (id, name, short_name, country) VALUES (?, ?, ?, ?)',
+          args: [s.team_id, s.team_name, teamShortName, teamCountry],
         });
       } else {
         await client.execute({
-          sql: 'UPDATE teams SET name = ? WHERE id = ?',
-          args: [s.team_name, s.team_id],
+          sql: 'UPDATE teams SET name = ?, short_name = COALESCE(?, short_name), country = COALESCE(?, country) WHERE id = ?',
+          args: [s.team_name, teamShortName, teamCountry, s.team_id],
         });
       }
 
@@ -142,8 +153,10 @@ export async function syncSingleFixture(event: {
   }
 
   // Ensure teams exist (INSERT OR REPLACE for upsert safety)
-  await client.execute({ sql: 'INSERT OR REPLACE INTO teams (id, name) VALUES (?, ?)', args: [event.home_team_id, event.home_team] });
-  await client.execute({ sql: 'INSERT OR REPLACE INTO teams (id, name) VALUES (?, ?)', args: [event.away_team_id, event.away_team] });
+  await client.execute({ sql: 'INSERT OR IGNORE INTO teams (id, name) VALUES (?, ?)', args: [event.home_team_id, event.home_team] });
+  await client.execute({ sql: 'UPDATE teams SET name = ? WHERE id = ?', args: [event.home_team, event.home_team_id] });
+  await client.execute({ sql: 'INSERT OR IGNORE INTO teams (id, name) VALUES (?, ?)', args: [event.away_team_id, event.away_team] });
+  await client.execute({ sql: 'UPDATE teams SET name = ? WHERE id = ?', args: [event.away_team, event.away_team_id] });
 
   // Upsert fixture
   await client.execute({
@@ -186,9 +199,11 @@ export async function syncFixtureDetails(fixtureId: number): Promise<void> {
             home_total_shots = ?, home_shots_on_target = ?, home_ball_possession = ?, home_expected_goals = ?,
             home_corner_kicks = ?, home_fouls = ?, home_yellow_cards = ?, home_red_cards = ?,
             home_attacks = ?, home_dangerous_attacks = ?,
+            home_big_chances = ?, home_passes = ?, home_pass_accuracy = ?, home_tackles = ?, home_interceptions = ?,
             away_total_shots = ?, away_shots_on_target = ?, away_ball_possession = ?, away_expected_goals = ?,
             away_corner_kicks = ?, away_fouls = ?, away_yellow_cards = ?, away_red_cards = ?,
-            away_attacks = ?, away_dangerous_attacks = ?
+            away_attacks = ?, away_dangerous_attacks = ?,
+            away_big_chances = ?, away_passes = ?, away_pass_accuracy = ?, away_tackles = ?, away_interceptions = ?
             WHERE fixture_id = ?`,
           args: [
             (home.total_shots as number) ?? 0, (home.shots_on_target as number) ?? 0,
@@ -196,11 +211,17 @@ export async function syncFixtureDetails(fixtureId: number): Promise<void> {
             (home.corner_kicks as number) ?? 0, (home.fouls as number) ?? 0,
             (home.yellow_cards as number) ?? 0, (home.red_cards as number) ?? 0,
             (home.attack as number) ?? 0, (home.dangerous_attack as number) ?? 0,
+            (home.big_chances as number) ?? 0, (home.passes as number) ?? 0,
+            (home.pass_accuracy as number) ?? 0, (home.tackles as number) ?? 0,
+            (home.interceptions as number) ?? 0,
             (away.total_shots as number) ?? 0, (away.shots_on_target as number) ?? 0,
             (away.ball_possession as number) ?? 50, (away.expected_goals as number) ?? 0,
             (away.corner_kicks as number) ?? 0, (away.fouls as number) ?? 0,
             (away.yellow_cards as number) ?? 0, (away.red_cards as number) ?? 0,
             (away.attack as number) ?? 0, (away.dangerous_attack as number) ?? 0,
+            (away.big_chances as number) ?? 0, (away.passes as number) ?? 0,
+            (away.pass_accuracy as number) ?? 0, (away.tackles as number) ?? 0,
+            (away.interceptions as number) ?? 0,
             fixtureId,
           ],
         });
@@ -208,9 +229,11 @@ export async function syncFixtureDetails(fixtureId: number): Promise<void> {
         await client.execute({
           sql: `INSERT INTO fixture_stats (fixture_id, home_total_shots, home_shots_on_target, home_ball_possession, home_expected_goals,
                 home_corner_kicks, home_fouls, home_yellow_cards, home_red_cards, home_attacks, home_dangerous_attacks,
+                home_big_chances, home_passes, home_pass_accuracy, home_tackles, home_interceptions,
                 away_total_shots, away_shots_on_target, away_ball_possession, away_expected_goals,
-                away_corner_kicks, away_fouls, away_yellow_cards, away_red_cards, away_attacks, away_dangerous_attacks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                away_corner_kicks, away_fouls, away_yellow_cards, away_red_cards, away_attacks, away_dangerous_attacks,
+                away_big_chances, away_passes, away_pass_accuracy, away_tackles, away_interceptions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           args: [
             fixtureId,
             (home.total_shots as number) ?? 0, (home.shots_on_target as number) ?? 0,
@@ -218,11 +241,17 @@ export async function syncFixtureDetails(fixtureId: number): Promise<void> {
             (home.corner_kicks as number) ?? 0, (home.fouls as number) ?? 0,
             (home.yellow_cards as number) ?? 0, (home.red_cards as number) ?? 0,
             (home.attack as number) ?? 0, (home.dangerous_attack as number) ?? 0,
+            (home.big_chances as number) ?? 0, (home.passes as number) ?? 0,
+            (home.pass_accuracy as number) ?? 0, (home.tackles as number) ?? 0,
+            (home.interceptions as number) ?? 0,
             (away.total_shots as number) ?? 0, (away.shots_on_target as number) ?? 0,
             (away.ball_possession as number) ?? 50, (away.expected_goals as number) ?? 0,
             (away.corner_kicks as number) ?? 0, (away.fouls as number) ?? 0,
             (away.yellow_cards as number) ?? 0, (away.red_cards as number) ?? 0,
             (away.attack as number) ?? 0, (away.dangerous_attack as number) ?? 0,
+            (away.big_chances as number) ?? 0, (away.passes as number) ?? 0,
+            (away.pass_accuracy as number) ?? 0, (away.tackles as number) ?? 0,
+            (away.interceptions as number) ?? 0,
           ],
         });
       }

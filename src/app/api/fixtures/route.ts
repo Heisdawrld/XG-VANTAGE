@@ -43,7 +43,8 @@ export async function GET(request: Request) {
 
     // Single query with LEFT JOINs
     const result = await client.execute({
-      sql: `SELECT f.*, ht.name as home_team_name, at.name as away_team_name, l.name as league_name,
+      sql: `SELECT f.*, ht.name as home_team_name, ht.short_name as home_team_short_name, ht.logo as home_team_logo,
+             at.name as away_team_name, at.short_name as away_team_short_name, at.logo as away_team_logo, l.name as league_name,
              p.pick_type, p.pick_label, p.confidence as pred_confidence, p.tier, p.verdict,
              p.home_win_prob, p.draw_prob, p.away_win_prob, p.over_25_prob, p.under_25_prob,
              p.btts_yes_prob, p.btts_no_prob, p.home_xg, p.away_xg, p.phantom_score, p.edge,
@@ -70,8 +71,8 @@ export async function GET(request: Request) {
       seasonId: row.season_id,
       homeTeamId: row.home_team_id,
       awayTeamId: row.away_team_id,
-      homeTeam: { id: row.home_team_id, name: row.home_team_name },
-      awayTeam: { id: row.away_team_id, name: row.away_team_name },
+      homeTeam: { id: row.home_team_id, name: row.home_team_name, shortName: row.home_team_short_name, logo: row.home_team_logo },
+      awayTeam: { id: row.away_team_id, name: row.away_team_name, shortName: row.away_team_short_name, logo: row.away_team_logo },
       leagueName: row.league_name,
       eventDate: row.event_date,
       status: row.status,

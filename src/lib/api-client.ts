@@ -31,8 +31,8 @@ export interface FixtureData {
   leagueId: number;
   homeTeamId: number;
   awayTeamId: number;
-  homeTeam: { id: number; name: string; shortName?: string };
-  awayTeam: { id: number; name: string; shortName?: string };
+  homeTeam: { id: number; name: string; shortName?: string; logo?: string | null };
+  awayTeam: { id: number; name: string; shortName?: string; logo?: string | null };
   leagueName?: string;
   eventDate: string;
   status: string;
@@ -72,6 +72,10 @@ export interface PickData {
   awayTeam: string;
   homeTeamId: number;
   awayTeamId: number;
+  homeTeamShortName?: string | null;
+  awayTeamShortName?: string | null;
+  homeTeamLogo?: string | null;
+  awayTeamLogo?: string | null;
   eventDate: string;
   leagueId?: number;
   pickType?: string;

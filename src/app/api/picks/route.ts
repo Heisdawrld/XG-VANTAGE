@@ -13,7 +13,8 @@ export async function GET(request: Request) {
     // Lower threshold to 40% to include more picks, sorted by confidence desc
     const result = await client.execute({
       sql: `SELECT p.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id, f.status,
-                   ht.name as home_team_name, at.name as away_team_name,
+                   ht.name as home_team_name, ht.short_name as home_team_short_name, ht.logo as home_team_logo,
+                   at.name as away_team_name, at.short_name as away_team_short_name, at.logo as away_team_logo,
                    l.name as league_name,
                    o.home_win, o.draw as odds_draw, o.away_win, o.over_25_goals, o.btts_yes
             FROM predictions p
@@ -34,6 +35,10 @@ export async function GET(request: Request) {
       awayTeam: (p.away_team_name as string) || 'Away',
       homeTeamId: p.home_team_id as number,
       awayTeamId: p.away_team_id as number,
+      homeTeamShortName: p.home_team_short_name as string | null,
+      awayTeamShortName: p.away_team_short_name as string | null,
+      homeTeamLogo: p.home_team_logo as string | null,
+      awayTeamLogo: p.away_team_logo as string | null,
       eventDate: p.event_date as string,
       leagueId: p.league_id as number,
       leagueName: p.league_name as string,

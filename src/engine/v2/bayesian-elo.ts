@@ -37,33 +37,45 @@ const Q_SQUARED = Q * Q;
 // existing ELO system stable and avoid migration headaches.
 // ---------------------------------------------------------------------------
 
-const CREATE_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS team_glicko (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_id       INTEGER NOT NULL,
-    league_id     INTEGER NOT NULL DEFAULT 0,
-    season_id     INTEGER NOT NULL DEFAULT 0,
-    rating        REAL    NOT NULL DEFAULT ${defaultRating},
-    deviation     REAL    NOT NULL DEFAULT ${defaultDeviation},
-    volatility    REAL    NOT NULL DEFAULT ${defaultVolatility},
-    home_rating   REAL    NOT NULL DEFAULT ${defaultRating},
-    home_deviation REAL   NOT NULL DEFAULT ${defaultDeviation},
-    away_rating   REAL    NOT NULL DEFAULT ${defaultRating},
-    away_deviation REAL   NOT NULL DEFAULT ${defaultDeviation},
-    match_count   INTEGER NOT NULL DEFAULT 0,
-    last_match_date TEXT,
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(team_id, league_id, season_id)
-  )
-`;
-
-/** Ensure the team_glicko table exists. Called lazily on first interaction. */
+/**
+ * Ensure the team_glicko table exists.
+ * The canonical schema is defined in @/lib/migrate.ts — this function
+ * only verifies the table is present (created by the migration pipeline).
+ * We no longer CREATE TABLE here to avoid schema conflicts.
+ */
 let tableEnsured = false;
 async function ensureTable(): Promise<void> {
   if (tableEnsured) return;
   try {
-    await client.execute(CREATE_TABLE_SQL);
+    // Verify the table exists by querying its schema
+    const check = await client.execute({
+      sql: "SELECT name FROM sqlite_master WHERE type='table' AND name='team_glicko'",
+      args: [],
+    });
+    if (check.rows.length === 0) {
+      // Table doesn't exist — create it with the canonical schema
+      // (This should normally be handled by migrate.ts, but as a safety net)
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS team_glicko (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          team_id       INTEGER NOT NULL,
+          league_id     INTEGER NOT NULL DEFAULT 0,
+          season_id     INTEGER NOT NULL DEFAULT 0,
+          rating        REAL    NOT NULL DEFAULT ${defaultRating},
+          deviation     REAL    NOT NULL DEFAULT ${defaultDeviation},
+          volatility    REAL    NOT NULL DEFAULT ${defaultVolatility},
+          home_rating   REAL    NOT NULL DEFAULT ${defaultRating},
+          home_deviation REAL   NOT NULL DEFAULT ${defaultDeviation},
+          away_rating   REAL    NOT NULL DEFAULT ${defaultRating},
+          away_deviation REAL   NOT NULL DEFAULT ${defaultDeviation},
+          match_count   INTEGER NOT NULL DEFAULT 0,
+          last_match_date TEXT,
+          created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+          updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(team_id, league_id, season_id)
+        )
+      `);
+    }
     tableEnsured = true;
   } catch {
     // Table may already exist — that's fine

@@ -386,53 +386,99 @@ function isValueBet(
 // Step 11: Store to DB
 // ============================================================================
 
+/**
+ * Ensure the predictions_v2 table exists with the correct schema.
+ * The canonical schema is defined in @/lib/migrate.ts.
+ * If the table exists with a wrong schema (missing xg_home or prediction_id),
+ * we drop it so the migration can recreate it correctly.
+ */
+let v2TableEnsured = false;
 async function ensurePredictionsV2Table(): Promise<void> {
-  // First check if the table has the correct schema (must have xg_home and prediction_id columns)
+  if (v2TableEnsured) return;
+
   try {
+    // Check if the table has the correct schema
     const cols = await client.execute({
       sql: "SELECT name FROM pragma_table_info('predictions_v2')",
       args: [],
     });
     const colNames = cols.rows.map(r => r.name as string);
-    if (colNames.length > 0 && (!colNames.includes('xg_home') || !colNames.includes('prediction_id'))) {
-      console.log('[prediction-engine] predictions_v2 has wrong schema — dropping and recreating...');
-      await client.execute('DROP TABLE predictions_v2');
-    }
-  } catch {
-    // Table doesn't exist yet — that's fine
-  }
 
-  await client.execute(`
-    CREATE TABLE IF NOT EXISTS predictions_v2 (
-      prediction_id TEXT NOT NULL PRIMARY KEY,
-      fixture_id INTEGER NOT NULL,
-      home_team_id INTEGER NOT NULL,
-      away_team_id INTEGER NOT NULL,
-      league_id INTEGER NOT NULL,
-      pick_type TEXT NOT NULL DEFAULT '',
-      confidence REAL NOT NULL DEFAULT 0,
-      tier TEXT NOT NULL DEFAULT 'medium',
-      xg_home REAL NOT NULL DEFAULT 0,
-      xg_away REAL NOT NULL DEFAULT 0,
-      script TEXT NOT NULL DEFAULT '',
-      calibrated_probs TEXT NOT NULL DEFAULT '{}',
-      market_selection TEXT NOT NULL DEFAULT '{}',
-      feature_vector TEXT NOT NULL DEFAULT '{}',
-      confidence_profile TEXT NOT NULL DEFAULT '{}',
-      key_reasons TEXT NOT NULL DEFAULT '[]',
-      contradicting_reasons TEXT NOT NULL DEFAULT '[]',
-      tactical_matchup TEXT NOT NULL DEFAULT '',
-      safe_bet INTEGER NOT NULL DEFAULT 0,
-      value_bet INTEGER NOT NULL DEFAULT 0,
-      top_scorelines TEXT NOT NULL DEFAULT '[]',
-      engine_version TEXT NOT NULL DEFAULT '',
-      data_quality TEXT NOT NULL DEFAULT 'partial',
-      generated_at TEXT NOT NULL,
-      result TEXT DEFAULT 'pending',
-      settled INTEGER NOT NULL DEFAULT 0,
-      settled_at TEXT
-    )
-  `);
+    if (colNames.length > 0 && (!colNames.includes('xg_home') || !colNames.includes('prediction_id'))) {
+      console.log('[prediction-engine] predictions_v2 has wrong schema — dropping for rebuild by migration...');
+      await client.execute('DROP TABLE predictions_v2');
+      // The migration will recreate it on next pipeline run.
+      // For now, create it with the correct schema as a safety net:
+      await client.execute(`
+        CREATE TABLE predictions_v2 (
+          prediction_id TEXT NOT NULL PRIMARY KEY,
+          fixture_id INTEGER NOT NULL,
+          home_team_id INTEGER NOT NULL,
+          away_team_id INTEGER NOT NULL,
+          league_id INTEGER NOT NULL,
+          pick_type TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 0,
+          tier TEXT NOT NULL DEFAULT 'medium',
+          xg_home REAL NOT NULL DEFAULT 0,
+          xg_away REAL NOT NULL DEFAULT 0,
+          script TEXT NOT NULL DEFAULT '',
+          calibrated_probs TEXT NOT NULL DEFAULT '{}',
+          market_selection TEXT NOT NULL DEFAULT '{}',
+          feature_vector TEXT NOT NULL DEFAULT '{}',
+          confidence_profile TEXT NOT NULL DEFAULT '{}',
+          key_reasons TEXT NOT NULL DEFAULT '[]',
+          contradicting_reasons TEXT NOT NULL DEFAULT '[]',
+          tactical_matchup TEXT NOT NULL DEFAULT '',
+          safe_bet INTEGER NOT NULL DEFAULT 0,
+          value_bet INTEGER NOT NULL DEFAULT 0,
+          top_scorelines TEXT NOT NULL DEFAULT '[]',
+          engine_version TEXT NOT NULL DEFAULT '',
+          data_quality TEXT NOT NULL DEFAULT 'partial',
+          generated_at TEXT NOT NULL,
+          result TEXT DEFAULT 'pending',
+          settled INTEGER NOT NULL DEFAULT 0,
+          settled_at TEXT
+        )
+      `);
+    } else if (colNames.length === 0) {
+      // Table doesn't exist — create it
+      await client.execute(`
+        CREATE TABLE predictions_v2 (
+          prediction_id TEXT NOT NULL PRIMARY KEY,
+          fixture_id INTEGER NOT NULL,
+          home_team_id INTEGER NOT NULL,
+          away_team_id INTEGER NOT NULL,
+          league_id INTEGER NOT NULL,
+          pick_type TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 0,
+          tier TEXT NOT NULL DEFAULT 'medium',
+          xg_home REAL NOT NULL DEFAULT 0,
+          xg_away REAL NOT NULL DEFAULT 0,
+          script TEXT NOT NULL DEFAULT '',
+          calibrated_probs TEXT NOT NULL DEFAULT '{}',
+          market_selection TEXT NOT NULL DEFAULT '{}',
+          feature_vector TEXT NOT NULL DEFAULT '{}',
+          confidence_profile TEXT NOT NULL DEFAULT '{}',
+          key_reasons TEXT NOT NULL DEFAULT '[]',
+          contradicting_reasons TEXT NOT NULL DEFAULT '[]',
+          tactical_matchup TEXT NOT NULL DEFAULT '',
+          safe_bet INTEGER NOT NULL DEFAULT 0,
+          value_bet INTEGER NOT NULL DEFAULT 0,
+          top_scorelines TEXT NOT NULL DEFAULT '[]',
+          engine_version TEXT NOT NULL DEFAULT '',
+          data_quality TEXT NOT NULL DEFAULT 'partial',
+          generated_at TEXT NOT NULL,
+          result TEXT DEFAULT 'pending',
+          settled INTEGER NOT NULL DEFAULT 0,
+          settled_at TEXT
+        )
+      `);
+    }
+    v2TableEnsured = true;
+  } catch {
+    // Table may already exist with correct schema — that's fine
+    v2TableEnsured = true;
+  }
 }
 
 async function storePrediction(prediction: V2Prediction): Promise<void> {

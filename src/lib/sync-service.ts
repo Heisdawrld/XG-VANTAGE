@@ -24,13 +24,21 @@ export async function syncLeagues(): Promise<number> {
 
       if (existing.rows.length > 0) {
         await client.execute({
-          sql: `UPDATE leagues SET name = ?, country = ?, is_active = ?, season_id = ?, season_name = ? WHERE id = ?`,
-          args: [league.name, league.country, league.is_active ? 1 : 0, league.current_season?.id ?? null, league.current_season?.name ?? null, league.id],
+          sql: `UPDATE leagues SET name = ?, country = ?, is_active = ?, is_women = ?,
+                season_id = ?, season_name = ?, season_year = ?, season_start_date = ?, season_end_date = ? WHERE id = ?`,
+          args: [league.name, league.country, league.is_active ? 1 : 0, league.is_women ? 1 : 0,
+            league.current_season?.id ?? null, league.current_season?.name ?? null,
+            league.current_season?.year ?? null, league.current_season?.start_date ?? null,
+            league.current_season?.end_date ?? null, league.id],
         });
       } else {
         await client.execute({
-          sql: `INSERT INTO leagues (id, name, country, is_active, season_id, season_name) VALUES (?, ?, ?, ?, ?, ?)`,
-          args: [league.id, league.name, league.country, league.is_active ? 1 : 0, league.current_season?.id ?? null, league.current_season?.name ?? null],
+          sql: `INSERT INTO leagues (id, name, country, is_active, is_women, season_id, season_name, season_year, season_start_date, season_end_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [league.id, league.name, league.country, league.is_active ? 1 : 0, league.is_women ? 1 : 0,
+            league.current_season?.id ?? null, league.current_season?.name ?? null,
+            league.current_season?.year ?? null, league.current_season?.start_date ?? null,
+            league.current_season?.end_date ?? null],
         });
       }
       synced++;
@@ -70,8 +78,8 @@ export async function syncStandings(leagueId: number): Promise<number> {
 
       // Upsert team (use INSERT OR REPLACE — teams.id is PK)
       await client.execute({
-        sql: 'INSERT OR REPLACE INTO teams (id, name, short_name, country) VALUES (?, ?, ?, ?)',
-        args: [s.team_id, s.team_name, teamShortName, teamCountry],
+        sql: 'INSERT OR REPLACE INTO teams (id, name, short_name, country, country_code, venue_id) VALUES (?, ?, ?, ?, ?, ?)',
+        args: [s.team_id, s.team_name, teamShortName, teamCountry, null, null],
       });
 
       // Upsert standing (delete-then-insert to handle AUTOINCREMENT id + unique constraint)
@@ -149,28 +157,50 @@ export async function syncSingleFixture(event: {
   await client.execute({ sql: 'INSERT OR IGNORE INTO teams (id, name) VALUES (?, ?)', args: [event.away_team_id, event.away_team] });
   await client.execute({ sql: 'UPDATE teams SET name = ? WHERE id = ?', args: [event.away_team, event.away_team_id] });
 
-  // Upsert fixture
+  // Upsert fixture — includes ALL BSDEvent fields
   await client.execute({
     sql: `INSERT INTO fixtures (id, league_id, season_id, home_team_id, away_team_id, event_date, status,
-          round_number, round_name, period, current_minute, home_score, away_score, home_score_ht, away_score_ht,
-          is_local_derby, travel_distance_km, weather_code, weather_desc, temperature, wind_speed, attendance, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          round_number, round_name, group_name, period, current_minute,
+          home_score, away_score, home_score_ht, away_score_ht,
+          home_coach_id, away_coach_id, referee_id, venue_id,
+          penalty_shootout, extra_time_score,
+          is_local_derby, is_neutral_ground, travel_distance_km,
+          weather_code, weather_desc, temperature, wind_speed, pitch_condition,
+          attendance, live_websocket, last_updated, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
           ON CONFLICT(id) DO UPDATE SET
           status = excluded.status, period = excluded.period, current_minute = excluded.current_minute,
           home_score = excluded.home_score, away_score = excluded.away_score,
           home_score_ht = excluded.home_score_ht, away_score_ht = excluded.away_score_ht,
+          home_coach_id = COALESCE(excluded.home_coach_id, fixtures.home_coach_id),
+          away_coach_id = COALESCE(excluded.away_coach_id, fixtures.away_coach_id),
+          referee_id = COALESCE(excluded.referee_id, fixtures.referee_id),
+          venue_id = COALESCE(excluded.venue_id, fixtures.venue_id),
+          penalty_shootout = COALESCE(excluded.penalty_shootout, fixtures.penalty_shootout),
+          extra_time_score = COALESCE(excluded.extra_time_score, fixtures.extra_time_score),
           league_id = COALESCE(excluded.league_id, fixtures.league_id),
           season_id = COALESCE(excluded.season_id, fixtures.season_id),
+          live_websocket = excluded.live_websocket,
+          last_updated = excluded.last_updated,
           updated_at = datetime('now')`,
     args: [
       event.id, event.league_id, event.season_id ?? null,
       event.home_team_id, event.away_team_id, event.event_date, event.status,
-      event.round_number ?? null, event.round_name ?? null, event.period ?? null, event.current_minute ?? null,
+      event.round_number ?? null, event.round_name ?? null, (event as any).group_name ?? null,
+      event.period ?? null, event.current_minute ?? null,
       event.home_score ?? null, event.away_score ?? null, event.home_score_ht ?? null, event.away_score_ht ?? null,
-      event.is_local_derby ? 1 : 0, event.travel_distance_km ?? null,
+      (event as any).home_coach_id ?? null, (event as any).away_coach_id ?? null,
+      (event as any).referee_id ?? null, (event as any).venue_id ?? null,
+      (event as any).penalty_shootout ?? null, (event as any).extra_time_score ?? null,
+      event.is_local_derby ? 1 : 0,
+      ((event as any).is_neutral_ground ? 1 : 0),
+      event.travel_distance_km ?? null,
       event.weather?.code ?? null, event.weather?.description ?? null,
       event.weather?.temperature_c ?? null, event.weather?.wind_speed ?? null,
+      (event as any).pitch_condition ?? null,
       event.attendance ?? null,
+      (event as any).live_websocket ? 1 : 0,
+      (event as any).last_updated ?? null,
     ],
   });
 }
@@ -322,6 +352,68 @@ export async function syncFixtureDetails(fixtureId: number): Promise<void> {
       });
     }
   } catch { /* Lineups might not be available */ }
+
+  // Sync incidents (goals, cards, subs)
+  try {
+    const incidents = await bsdClient.getEventIncidents(fixtureId);
+    if (incidents.incidents && incidents.incidents.length > 0) {
+      const existingIncidents = await client.execute({ sql: 'SELECT id FROM fixture_incidents WHERE fixture_id = ?', args: [fixtureId] });
+      if (existingIncidents.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE fixture_incidents SET incidents_json = ?, updated_at = datetime('now') WHERE fixture_id = ?`,
+          args: [JSON.stringify(incidents.incidents), fixtureId],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO fixture_incidents (fixture_id, incidents_json, updated_at) VALUES (?, ?, datetime('now'))`,
+          args: [fixtureId, JSON.stringify(incidents.incidents)],
+        });
+      }
+    }
+  } catch { /* Incidents might not be available */ }
+
+  // Sync metadata (fun facts, AI preview)
+  try {
+    const metadata = await bsdClient.getEventMetadata(fixtureId);
+    if (metadata.funfacts || metadata.ai_preview) {
+      const existingMeta = await client.execute({ sql: 'SELECT id FROM fixture_metadata WHERE fixture_id = ?', args: [fixtureId] });
+      if (existingMeta.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE fixture_metadata SET funfacts_json = ?, ai_preview_text = ?, ai_preview_generated_at = ?, updated_at = datetime('now') WHERE fixture_id = ?`,
+          args: [JSON.stringify(metadata.funfacts ?? []),
+            metadata.ai_preview?.text ?? null,
+            metadata.ai_preview?.generated_at ?? null,
+            fixtureId],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO fixture_metadata (fixture_id, funfacts_json, ai_preview_text, ai_preview_generated_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'))`,
+          args: [fixtureId, JSON.stringify(metadata.funfacts ?? []),
+            metadata.ai_preview?.text ?? null,
+            metadata.ai_preview?.generated_at ?? null],
+        });
+      }
+    }
+  } catch { /* Metadata might not be available */ }
+
+  // Sync player stats
+  try {
+    const playerStats = await bsdClient.getEventPlayerStats(fixtureId);
+    if (playerStats.player_stats && playerStats.player_stats.length > 0) {
+      const existingPs = await client.execute({ sql: 'SELECT id FROM fixture_player_stats WHERE fixture_id = ?', args: [fixtureId] });
+      if (existingPs.rows.length > 0) {
+        await client.execute({
+          sql: `UPDATE fixture_player_stats SET player_stats_json = ?, updated_at = datetime('now') WHERE fixture_id = ?`,
+          args: [JSON.stringify(playerStats.player_stats), fixtureId],
+        });
+      } else {
+        await client.execute({
+          sql: `INSERT INTO fixture_player_stats (fixture_id, player_stats_json, updated_at) VALUES (?, ?, datetime('now'))`,
+          args: [fixtureId, JSON.stringify(playerStats.player_stats)],
+        });
+      }
+    }
+  } catch { /* Player stats might not be available */ }
 }
 
 // ============================================================================
@@ -392,8 +484,8 @@ async function enrichTeamData(teamId: number): Promise<void> {
       if (teamsData.results.length > 0) {
         const t = teamsData.results[0];
         await client.execute({
-          sql: 'UPDATE teams SET short_name = COALESCE(?, short_name), country = COALESCE(?, country) WHERE id = ?',
-          args: [t.short_name || null, t.country || null, teamId],
+          sql: 'UPDATE teams SET short_name = COALESCE(?, short_name), country = COALESCE(?, country), venue_id = COALESCE(?, venue_id) WHERE id = ?',
+          args: [t.short_name || null, t.country || null, t.venue_id || null, teamId],
         });
       }
     }

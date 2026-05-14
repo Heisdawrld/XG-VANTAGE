@@ -3,8 +3,11 @@ services:
     name: xg-vantage
     runtime: node
     plan: starter
-    buildCommand: bun install && bun run build
-    startCommand: bun run start
+    region: oregon
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: chmod +x start.sh && bash start.sh
+    healthCheckPath: /api/cron
     envVars:
       - key: NODE_ENV
         value: production
@@ -19,4 +22,4 @@ services:
       - key: NEXTAUTH_URL
         value: https://xg-vantage.onrender.com
       - key: PORT
-        value: "3000"
+        value: "10000"

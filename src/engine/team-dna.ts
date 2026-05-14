@@ -63,6 +63,15 @@ export async function computeTeamDNA(teamId: number): Promise<void> {
   // Compute form strings
   const homeForm = computeFormString(homeFixtures.rows, 'home');
   const awayForm = computeFormString(awayFixtures.rows, 'away');
+  // Combined form: take first 3 from home, first 2 from away (or vice versa, most recent first)
+  const allFormFixtures = await client.execute({
+    sql: `SELECT f.home_score, f.away_score, f.home_team_id, f.away_team_id, f.event_date
+          FROM fixtures f
+          WHERE (f.home_team_id = ? OR f.away_team_id = ?) AND f.status = 'finished' AND f.home_score IS NOT NULL AND f.away_score IS NOT NULL
+          ORDER BY f.event_date DESC LIMIT 5`,
+    args: [teamId, teamId],
+  });
+  const overallForm = computeOverallFormString(allFormFixtures.rows, teamId);
 
   // Upsert team profile
   const existing = await client.execute({
@@ -82,7 +91,7 @@ export async function computeTeamDNA(teamId: number): Promise<void> {
         avgGoalsScored, avgGoalsConceded, avgXgFor, avgXgAgainst,
         overallPossession, overallCleanSheet, overallBtts, overallOver25,
         homeDNA.avgGoalsScored, homeDNA.avgGoalsConceded, awayDNA.avgGoalsScored, awayDNA.avgGoalsConceded,
-        style, homeForm, awayForm, teamId,
+        style, overallForm, homeForm, awayForm, teamId,
       ],
     });
   } else {
@@ -97,7 +106,7 @@ export async function computeTeamDNA(teamId: number): Promise<void> {
         teamId, avgGoalsScored, avgGoalsConceded, avgXgFor, avgXgAgainst,
         overallPossession, overallCleanSheet, overallBtts, overallOver25,
         homeDNA.avgGoalsScored, homeDNA.avgGoalsConceded, awayDNA.avgGoalsScored, awayDNA.avgGoalsConceded,
-        style, homeForm, awayForm,
+        style, overallForm, homeForm, awayForm,
       ],
     });
   }
@@ -193,6 +202,19 @@ function computeFormString(fixtures: Array<Record<string, unknown>>, side: 'home
   const isHome = side === 'home';
   let form = '';
   for (const f of fixtures.slice(0, 5)) {
+    const scored = isHome ? (f.home_score as number) : (f.away_score as number);
+    const conceded = isHome ? (f.away_score as number) : (f.home_score as number);
+    if (scored > conceded) form += 'W';
+    else if (scored === conceded) form += 'D';
+    else form += 'L';
+  }
+  return form || 'DDDDD';
+}
+
+function computeOverallFormString(fixtures: Array<Record<string, unknown>>, teamId: number): string {
+  let form = '';
+  for (const f of fixtures.slice(0, 5)) {
+    const isHome = (f.home_team_id as number) === teamId;
     const scored = isHome ? (f.home_score as number) : (f.away_score as number);
     const conceded = isHome ? (f.away_score as number) : (f.home_score as number);
     if (scored > conceded) form += 'W';

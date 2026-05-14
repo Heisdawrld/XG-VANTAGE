@@ -491,12 +491,12 @@ export async function getModelPerformance(): Promise<ModelPerformance> {
     // ── By league ──────────────────────────────────────────────────────────
     const leagueResult = await client.execute(`
       SELECT
-        p_tier.league_id,
+        f.league_id,
         COUNT(*) as cnt,
         SUM(pf.was_correct) as correct
       FROM prediction_feedback pf
-      INNER JOIN predictions p_tier ON pf.fixture_id = p_tier.fixture_id
-      GROUP BY p_tier.league_id
+      INNER JOIN fixtures f ON pf.fixture_id = f.id
+      GROUP BY f.league_id
     `);
 
     const byLeague: Record<string, { accuracy: number; count: number }> = {};

@@ -9,25 +9,31 @@ export async function GET(request: Request) {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
-    // Try V2 predictions first (much richer data)
-    const v2Result = await client.execute({
-      sql: `SELECT p2.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id, f.status,
-                   ht.name as home_team_name, ht.short_name as home_team_short_name, ht.logo as home_team_logo,
-                   at.name as away_team_name, at.short_name as away_team_short_name, at.logo as away_team_logo,
-                   l.name as league_name,
-                   o.home_win, o.draw as odds_draw, o.away_win, o.over_25_goals, o.btts_yes
-            FROM predictions_v2 p2
-            JOIN fixtures f ON p2.fixture_id = f.id
-            LEFT JOIN teams ht ON f.home_team_id = ht.id
-            LEFT JOIN teams at ON f.away_team_id = at.id
-            LEFT JOIN leagues l ON f.league_id = l.id
-            LEFT JOIN fixture_odds o ON o.fixture_id = f.id
-            WHERE f.event_date >= ? AND f.event_date < ?
-              AND f.status IN ('notstarted', 'inprogress', 'not_started')
-              AND p2.tier IN ('elite', 'playable', 'value', 'medium')
-            ORDER BY p2.confidence DESC LIMIT ?`,
-      args: [today, tomorrow, limit],
-    });
+    // Try V2 predictions first (much richer data) — with safe fallback
+    let v2Result;
+    try {
+      v2Result = await client.execute({
+        sql: `SELECT p2.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id, f.status,
+                     ht.name as home_team_name, ht.short_name as home_team_short_name, ht.logo as home_team_logo,
+                     at.name as away_team_name, at.short_name as away_team_short_name, at.logo as away_team_logo,
+                     l.name as league_name,
+                     o.home_win, o.draw as odds_draw, o.away_win, o.over_25_goals, o.btts_yes
+              FROM predictions_v2 p2
+              JOIN fixtures f ON p2.fixture_id = f.id
+              LEFT JOIN teams ht ON f.home_team_id = ht.id
+              LEFT JOIN teams at ON f.away_team_id = at.id
+              LEFT JOIN leagues l ON f.league_id = l.id
+              LEFT JOIN fixture_odds o ON o.fixture_id = f.id
+              WHERE f.event_date >= ? AND f.event_date < ?
+                AND f.status IN ('notstarted', 'inprogress', 'not_started')
+                AND p2.tier IN ('elite', 'playable', 'value', 'medium')
+              ORDER BY p2.confidence DESC LIMIT ?`,
+        args: [today, tomorrow, limit],
+      });
+    } catch {
+      // predictions_v2 table doesn't exist yet — fall through to V1
+      v2Result = { rows: [] };
+    }
 
     if (v2Result.rows.length > 0) {
       const picks = v2Result.rows.map((p, i) => {

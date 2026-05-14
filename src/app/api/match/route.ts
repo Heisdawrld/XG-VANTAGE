@@ -112,8 +112,15 @@ export async function GET(request: Request) {
     const lineupResult = await client.execute({ sql: 'SELECT * FROM fixture_lineups WHERE fixture_id = ?', args: [fixtureId] });
 
     // Get prediction with full data — try V2 first, then V1
-    let predResult = await client.execute({ sql: 'SELECT * FROM predictions_v2 WHERE fixture_id = ?', args: [fixtureId] });
-    const isV2Prediction = predResult.rows.length > 0;
+    let predResult;
+    let isV2Prediction = false;
+    try {
+      predResult = await client.execute({ sql: 'SELECT * FROM predictions_v2 WHERE fixture_id = ?', args: [fixtureId] });
+      isV2Prediction = predResult.rows.length > 0;
+    } catch {
+      // predictions_v2 table doesn't exist yet
+      predResult = { rows: [] };
+    }
     if (!isV2Prediction) {
       predResult = await client.execute({ sql: 'SELECT * FROM predictions WHERE fixture_id = ?', args: [fixtureId] });
     }
@@ -431,14 +438,20 @@ export async function GET(request: Request) {
     });
 
     // Get V2 Glicko (Bayesian ELO) ratings if available
-    const homeGlickoResult = await client.execute({
-      sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
-      args: [homeTeamId],
-    });
-    const awayGlickoResult = await client.execute({
-      sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
-      args: [awayTeamId],
-    });
+    let homeGlickoResult = { rows: [] as unknown[] };
+    let awayGlickoResult = { rows: [] as unknown[] };
+    try {
+      homeGlickoResult = await client.execute({
+        sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
+        args: [homeTeamId],
+      });
+      awayGlickoResult = await client.execute({
+        sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
+        args: [awayTeamId],
+      });
+    } catch {
+      // team_glicko table doesn't exist yet
+    }
 
     // If no team profile and we have time, compute DNA on-the-fly
     if (homeProfileResult.rows.length === 0 || awayProfileResult.rows.length === 0) {

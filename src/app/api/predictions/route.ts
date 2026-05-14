@@ -63,19 +63,25 @@ export async function GET(request: Request) {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
-    // Try V2 predictions first
-    const v2Result = await client.execute({
-      sql: `SELECT p2.*, f.event_date, f.status as fixture_status, f.home_team_id, f.away_team_id,
-                   ht.name as home_team_name, at.name as away_team_name, l.name as league_name
-            FROM predictions_v2 p2
-            JOIN fixtures f ON p2.fixture_id = f.id
-            LEFT JOIN teams ht ON f.home_team_id = ht.id
-            LEFT JOIN teams at ON f.away_team_id = at.id
-            LEFT JOIN leagues l ON f.league_id = l.id
-            WHERE f.event_date >= ? AND f.event_date < ?
-            ORDER BY p2.confidence DESC`,
-      args: [today, tomorrow],
-    });
+    // Try V2 predictions first (with safe fallback if table doesn't exist)
+    let v2Result;
+    try {
+      v2Result = await client.execute({
+        sql: `SELECT p2.*, f.event_date, f.status as fixture_status, f.home_team_id, f.away_team_id,
+                     ht.name as home_team_name, at.name as away_team_name, l.name as league_name
+              FROM predictions_v2 p2
+              JOIN fixtures f ON p2.fixture_id = f.id
+              LEFT JOIN teams ht ON f.home_team_id = ht.id
+              LEFT JOIN teams at ON f.away_team_id = at.id
+              LEFT JOIN leagues l ON f.league_id = l.id
+              WHERE f.event_date >= ? AND f.event_date < ?
+              ORDER BY p2.confidence DESC`,
+        args: [today, tomorrow],
+      });
+    } catch {
+      // predictions_v2 table doesn't exist yet
+      v2Result = { rows: [] };
+    }
 
     if (v2Result.rows.length > 0) {
       const predictions = v2Result.rows.map(p => ({

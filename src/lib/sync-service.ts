@@ -68,43 +68,23 @@ export async function syncStandings(leagueId: number): Promise<number> {
         }
       } catch { /* silent */ }
 
-      if (existingTeam.rows.length === 0) {
-        await client.execute({
-          sql: 'INSERT INTO teams (id, name, short_name, country) VALUES (?, ?, ?, ?)',
-          args: [s.team_id, s.team_name, teamShortName, teamCountry],
-        });
-      } else {
-        await client.execute({
-          sql: 'UPDATE teams SET name = ?, short_name = COALESCE(?, short_name), country = COALESCE(?, country) WHERE id = ?',
-          args: [s.team_name, teamShortName, teamCountry, s.team_id],
-        });
-      }
-
-      // Upsert standing
-      const existingStanding = await client.execute({
-        sql: 'SELECT id FROM standings WHERE league_id = ? AND season_id = ? AND team_id = ?',
-        args: [leagueId, data.season?.id ?? 0, s.team_id],
+      // Upsert team (use INSERT OR REPLACE — teams.id is PK)
+      await client.execute({
+        sql: 'INSERT OR REPLACE INTO teams (id, name, short_name, country) VALUES (?, ?, ?, ?)',
+        args: [s.team_id, s.team_name, teamShortName, teamCountry],
       });
 
-      if (existingStanding.rows.length > 0) {
-        await client.execute({
-          sql: `UPDATE standings SET position = ?, played = ?, won = ?, drawn = ?, lost = ?,
-                gf = ?, ga = ?, gd = ?, pts = ?, xgf = ?, xga = ?, xgd = ?,
-                xg_games = ?, form = ?, is_live = ?, team_name = ?
-                WHERE league_id = ? AND season_id = ? AND team_id = ?`,
-          args: [s.position, s.played, s.won, s.drawn, s.lost, s.gf, s.ga, s.gd, s.pts,
-            s.xgf ?? null, s.xga ?? null, s.xgd ?? null, s.xg_games ?? null,
-            s.form, s.live ? 1 : 0, s.team_name,
-            leagueId, data.season?.id ?? 0, s.team_id],
-        });
-      } else {
-        await client.execute({
-          sql: `INSERT INTO standings (league_id, season_id, team_id, team_name, position, played, won, drawn, lost, gf, ga, gd, pts, xgf, xga, xgd, xg_games, form, is_live)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [leagueId, data.season?.id ?? 0, s.team_id, s.team_name, s.position, s.played, s.won, s.drawn, s.lost, s.gf, s.ga, s.gd, s.pts,
-            s.xgf ?? null, s.xga ?? null, s.xgd ?? null, s.xg_games ?? null, s.form, s.live ? 1 : 0],
-        });
-      }
+      // Upsert standing (delete-then-insert to handle AUTOINCREMENT id + unique constraint)
+      await client.execute({
+        sql: 'DELETE FROM standings WHERE league_id = ? AND season_id = ? AND team_id = ?',
+        args: [leagueId, data.season?.id ?? 0, s.team_id],
+      });
+      await client.execute({
+        sql: `INSERT INTO standings (league_id, season_id, team_id, team_name, position, played, won, drawn, lost, gf, ga, gd, pts, xgf, xga, xgd, xg_games, form, is_live)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [leagueId, data.season?.id ?? 0, s.team_id, s.team_name, s.position, s.played, s.won, s.drawn, s.lost, s.gf, s.ga, s.gd, s.pts,
+          s.xgf ?? null, s.xga ?? null, s.xgd ?? null, s.xg_games ?? null, s.form, s.live ? 1 : 0],
+      });
       synced++;
     }
     console.log(`[Sync] Synced ${synced} standings for league ${leagueId}`);

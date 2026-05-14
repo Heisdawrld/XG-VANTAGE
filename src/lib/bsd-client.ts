@@ -404,7 +404,7 @@ export const bsdClient = {
   },
 
   // Leagues
-  getLeagues(params?: { country?: string; is_women?: boolean; is_active?: boolean; limit?: number; offset?: number }): Promise<{ count: number; results: BSDLeague[] }> {
+  getLeagues(params?: { country?: string; is_women?: boolean; is_active?: boolean; limit?: number; offset?: number }): Promise<{ count: number; next?: string; previous?: string | null; results: BSDLeague[] }> {
     const qs = new URLSearchParams();
     if (params?.country) qs.set('country', params.country);
     if (params?.is_women !== undefined) qs.set('is_women', String(params.is_women));
@@ -434,11 +434,15 @@ export const bsdClient = {
     return bsdFetch(`teams/?${qs.toString()}`, { ttl: 3600 });
   },
 
+  getTeam(id: number): Promise<{ id: number; name: string; short_name: string; country: string; venue_id?: number }> {
+    return bsdFetch(`teams/${id}/`, { ttl: 3600 });
+  },
+
   getTeamSquad(id: number): Promise<BSDTeamSquad> {
     return bsdFetch(`teams/${id}/squad/`, { ttl: 1800 });
   },
 
-  getTeamFixtures(id: number, params?: { date_from?: string; date_to?: string; league_id?: number; status?: string; limit?: number; offset?: number }): Promise<{ count: number; results: BSDEvent[] }> {
+  getTeamFixtures(id: number, params?: { date_from?: string; date_to?: string; league_id?: number; status?: string; limit?: number; offset?: number }): Promise<{ count: number; next?: string; previous?: string | null; results: BSDEvent[] }> {
     const qs = new URLSearchParams();
     if (params?.date_from) qs.set('date_from', params.date_from);
     if (params?.date_to) qs.set('date_to', params.date_to);
@@ -446,7 +450,7 @@ export const bsdClient = {
     if (params?.status) qs.set('status', params.status);
     if (params?.limit) qs.set('limit', String(params.limit));
     if (params?.offset) qs.set('offset', String(params.offset));
-    return bsdFetch(`teams/${id}/fixtures/?${qs.toString()}`, { ttl: 120 });
+    return bsdFetch(`teams/${id}/fixtures/?${qs.toString()}`, { ttl: 60, cache: false });
   },
 
   // Managers

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { fullDailySync, syncFixtures, syncStandings, syncFixtureDetails } from '@/lib/sync-service';
+import { fullDailySync, syncFixtures, syncStandings, syncFixtureDetails, deepSync, syncTeamHistory, syncH2H, syncTeamLast5 } from '@/lib/sync-service';
 
 export async function POST(request: Request) {
   try {
@@ -10,6 +10,9 @@ export async function POST(request: Request) {
     switch (action) {
       case 'full':
         result = await fullDailySync();
+        break;
+      case 'deep-sync':
+        result = await deepSync(body.daysBack || 60);
         break;
       case 'fixtures':
         result = await syncFixtures({
@@ -24,6 +27,15 @@ export async function POST(request: Request) {
       case 'details':
         await syncFixtureDetails(body.fixtureId);
         result = { ok: true };
+        break;
+      case 'team-history':
+        result = await syncTeamHistory(body.teamId, body.daysBack || 60);
+        break;
+      case 'h2h':
+        result = await syncH2H(body.homeTeamId, body.awayTeamId);
+        break;
+      case 'team-last5':
+        result = await syncTeamLast5(body.teamId);
         break;
       default:
         result = await fullDailySync();

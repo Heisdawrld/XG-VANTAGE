@@ -27,11 +27,23 @@ function hashColor(str: string): string {
   return `hsl(${hue}, 55%, 30%)`;
 }
 
+/**
+ * TeamLogo component - displays team logos with a beautiful initials fallback
+ *
+ * Priority:
+ * 1. If logoUrl is provided and valid, show the image
+ * 2. Fallback: Show team initials on a gradient circle
+ *
+ * Note: BSD API doesn't provide team logos. The initials-based fallback
+ * is the default. For a production app, you could integrate with
+ * API-Football or another source that provides logo URLs.
+ */
 export function TeamLogo({ teamId, name, shortName, logoUrl, size = 40, className = '' }: TeamLogoProps) {
   const [imgError, setImgError] = useState(false);
   const displayName = shortName || name || '?';
   const initials = getInitials(name || shortName || '');
   const bgColor = hashColor(name || String(teamId || ''));
+  const fontSize = Math.max(8, size * 0.35);
 
   // If we have a logo URL and it hasn't errored, show the image
   if (logoUrl && !imgError) {
@@ -57,11 +69,12 @@ export function TeamLogo({ teamId, name, shortName, logoUrl, size = 40, classNam
         height: size,
         background: `linear-gradient(135deg, ${bgColor}, ${bgColor}dd)`,
         flexShrink: 0,
+        boxShadow: `0 0 ${size * 0.15}px ${bgColor}44`,
       }}
     >
       <span
         style={{
-          fontSize: size * 0.35,
+          fontSize,
           fontWeight: 700,
           color: 'rgba(255,255,255,0.9)',
           letterSpacing: '0.5px',

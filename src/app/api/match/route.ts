@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { client } from '@/lib/db-turso';
 import { bsdClient } from '@/lib/bsd-client';
-import { syncFixtureDetails } from '@/lib/sync-service';
+import { syncFixtureDetails, syncH2H, syncTeamLast5 } from '@/lib/sync-service';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -13,30 +13,75 @@ export async function GET(request: Request) {
 
   try {
     // Get fixture with all related data
-    const fixtureResult = await client.execute({
+    let fixtureResult = await client.execute({
       sql: 'SELECT * FROM fixtures WHERE id = ?',
       args: [fixtureId],
     });
 
+    // If fixture not in DB, try fetching from BSD API directly
     if (fixtureResult.rows.length === 0) {
-      // Try fetching from BSD API directly
       try {
         const event = await bsdClient.getEvent(fixtureId);
-        const [stats, odds, lineups, metadata] = await Promise.allSettled([
-          bsdClient.getEventStats(fixtureId),
-          bsdClient.getEventOdds(fixtureId),
-          bsdClient.getEventLineups(fixtureId),
-          bsdClient.getEventMetadata(fixtureId),
-        ]);
+        // Store the fixture first
+        const { syncSingleFixture } = await import('@/lib/sync-service');
+        await syncSingleFixture(event);
 
-        return NextResponse.json({
-          source: 'api',
-          fixture: event,
-          stats: stats.status === 'fulfilled' ? stats.value : null,
-          odds: odds.status === 'fulfilled' ? odds.value : null,
-          lineups: lineups.status === 'fulfilled' ? lineups.value : null,
-          metadata: metadata.status === 'fulfilled' ? metadata.value : null,
+        // Re-query from DB
+        fixtureResult = await client.execute({
+          sql: 'SELECT * FROM fixtures WHERE id = ?',
+          args: [fixtureId],
         });
+
+        if (fixtureResult.rows.length === 0) {
+          // Return BSD data directly if DB storage failed
+          const [stats, odds, lineups, metadata] = await Promise.allSettled([
+            bsdClient.getEventStats(fixtureId),
+            bsdClient.getEventOdds(fixtureId),
+            bsdClient.getEventLineups(fixtureId),
+            bsdClient.getEventMetadata(fixtureId),
+          ]);
+
+          return NextResponse.json({
+            source: 'api',
+            fixture: {
+              id: event.id,
+              leagueId: event.league_id,
+              seasonId: event.season_id,
+              homeTeamId: event.home_team_id,
+              awayTeamId: event.away_team_id,
+              homeTeam: { id: event.home_team_id, name: event.home_team, shortName: null, logo: null },
+              awayTeam: { id: event.away_team_id, name: event.away_team, shortName: null, logo: null },
+              eventDate: event.event_date,
+              status: event.status,
+              period: event.period,
+              currentMinute: event.current_minute,
+              homeScore: event.home_score,
+              awayScore: event.away_score,
+              homeScoreHt: event.home_score_ht,
+              awayScoreHt: event.away_score_ht,
+              roundName: event.round_name,
+              isLocalDerby: event.is_local_derby,
+              travelDistanceKm: event.travel_distance_km,
+              weatherCode: event.weather?.code,
+              weatherDesc: event.weather?.description,
+              temperature: event.weather?.temperature_c,
+              windSpeed: event.weather?.wind_speed,
+              stats: stats.status === 'fulfilled' ? stats.value?.stats : null,
+              odds: odds.status === 'fulfilled' ? odds.value?.odds : null,
+              lineup: lineups.status === 'fulfilled' ? lineups.value : null,
+              metadata: metadata.status === 'fulfilled' ? metadata.value : null,
+              h2h: { matches: [], summary: { totalMatches: 0, homeWins: 0, draws: 0, awayWins: 0, homeGoals: 0, awayGoals: 0 } },
+              homeLast5: [],
+              awayLast5: [],
+              homeProfile: null,
+              awayProfile: null,
+              homeElo: null,
+              awayElo: null,
+              prediction: null,
+              standings: [],
+            },
+          });
+        }
       } catch {
         return NextResponse.json({ error: 'Match not found' }, { status: 404 });
       }
@@ -84,8 +129,10 @@ export async function GET(request: Request) {
     const homeTeamId = f.home_team_id as number;
     const awayTeamId = f.away_team_id as number;
 
-    // Get H2H data (last 10 meetings between these two teams)
-    const h2hResult = await client.execute({
+    // ========================================================================
+    // H2H DATA — Fetch from DB, or on-the-fly from BSD API if empty
+    // ========================================================================
+    let h2hResult = await client.execute({
       sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
                    f.home_score, f.away_score, f.status, f.league_id, l.name as league_name
             FROM fixtures f
@@ -96,12 +143,32 @@ export async function GET(request: Request) {
       args: [homeTeamId, awayTeamId, awayTeamId, homeTeamId],
     });
 
+    // If no H2H data in DB, try fetching from BSD API on-the-fly
+    if (h2hResult.rows.length === 0) {
+      console.log(`[Match] No H2H data in DB, fetching from BSD API for teams ${homeTeamId} vs ${awayTeamId}`);
+      try {
+        await syncH2H(homeTeamId, awayTeamId);
+        // Re-query after sync
+        h2hResult = await client.execute({
+          sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
+                       f.home_score, f.away_score, f.status, f.league_id, l.name as league_name
+                FROM fixtures f
+                LEFT JOIN leagues l ON f.league_id = l.id
+                WHERE ((f.home_team_id = ? AND f.away_team_id = ?) OR (f.home_team_id = ? AND f.away_team_id = ?))
+                  AND f.status = 'finished' AND f.home_score IS NOT NULL
+                ORDER BY f.event_date DESC LIMIT 10`,
+          args: [homeTeamId, awayTeamId, awayTeamId, homeTeamId],
+        });
+      } catch (err) {
+        console.error(`[Match] H2H on-the-fly sync failed:`, err);
+      }
+    }
+
     // Get H2H summary stats
     let h2hHomeWins = 0, h2hDraws = 0, h2hAwayWins = 0, h2hHomeGoals = 0, h2hAwayGoals = 0;
     for (const h of h2hResult.rows) {
       const hs = h.home_score as number;
       const as_ = h.away_score as number;
-      // Count from perspective of current home team
       if (h.home_team_id === homeTeamId) {
         h2hHomeGoals += hs;
         h2hAwayGoals += as_;
@@ -109,7 +176,6 @@ export async function GET(request: Request) {
         else if (hs === as_) h2hDraws++;
         else h2hAwayWins++;
       } else {
-        // They were away team in this match
         h2hHomeGoals += as_;
         h2hAwayGoals += hs;
         if (as_ > hs) h2hHomeWins++;
@@ -118,8 +184,10 @@ export async function GET(request: Request) {
       }
     }
 
-    // Get last 5 matches for home team
-    const homeLast5 = await client.execute({
+    // ========================================================================
+    // LAST 5 MATCHES — Fetch from DB, or on-the-fly from BSD API if empty
+    // ========================================================================
+    let homeLast5 = await client.execute({
       sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
                    f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
                    ht.name as home_team_name, at.name as away_team_name
@@ -134,8 +202,7 @@ export async function GET(request: Request) {
       args: [homeTeamId, homeTeamId, fixtureId],
     });
 
-    // Get last 5 matches for away team
-    const awayLast5 = await client.execute({
+    let awayLast5 = await client.execute({
       sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
                    f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
                    ht.name as home_team_name, at.name as away_team_name
@@ -150,6 +217,53 @@ export async function GET(request: Request) {
       args: [awayTeamId, awayTeamId, fixtureId],
     });
 
+    // If last 5 data is empty, fetch from BSD API on-the-fly
+    if (homeLast5.rows.length === 0) {
+      console.log(`[Match] No last5 data in DB, fetching from BSD API for team ${homeTeamId}`);
+      try {
+        await syncTeamLast5(homeTeamId);
+        homeLast5 = await client.execute({
+          sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
+                       f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
+                       ht.name as home_team_name, at.name as away_team_name
+                FROM fixtures f
+                LEFT JOIN leagues l ON f.league_id = l.id
+                LEFT JOIN teams ht ON f.home_team_id = ht.id
+                LEFT JOIN teams at ON f.away_team_id = at.id
+                WHERE (f.home_team_id = ? OR f.away_team_id = ?)
+                  AND f.status = 'finished' AND f.home_score IS NOT NULL
+                  AND f.id != ?
+                ORDER BY f.event_date DESC LIMIT 5`,
+          args: [homeTeamId, homeTeamId, fixtureId],
+        });
+      } catch (err) {
+        console.error(`[Match] Last5 on-the-fly sync failed for home team:`, err);
+      }
+    }
+
+    if (awayLast5.rows.length === 0) {
+      console.log(`[Match] No last5 data in DB, fetching from BSD API for team ${awayTeamId}`);
+      try {
+        await syncTeamLast5(awayTeamId);
+        awayLast5 = await client.execute({
+          sql: `SELECT f.id, f.event_date, f.home_team_id, f.away_team_id,
+                       f.home_score, f.away_score, f.status, f.league_id, l.name as league_name,
+                       ht.name as home_team_name, at.name as away_team_name
+                FROM fixtures f
+                LEFT JOIN leagues l ON f.league_id = l.id
+                LEFT JOIN teams ht ON f.home_team_id = ht.id
+                LEFT JOIN teams at ON f.away_team_id = at.id
+                WHERE (f.home_team_id = ? OR f.away_team_id = ?)
+                  AND f.status = 'finished' AND f.home_score IS NOT NULL
+                  AND f.id != ?
+                ORDER BY f.event_date DESC LIMIT 5`,
+          args: [awayTeamId, awayTeamId, fixtureId],
+        });
+      } catch (err) {
+        console.error(`[Match] Last5 on-the-fly sync failed for away team:`, err);
+      }
+    }
+
     // Helper to format form result for a team
     function getFormResult(match: Record<string, unknown>, teamId: number): 'W' | 'D' | 'L' {
       const hs = match.home_score as number;
@@ -163,7 +277,7 @@ export async function GET(request: Request) {
     }
 
     // Build prediction object with parsed JSON fields
-    let prediction = null;
+    let prediction: Record<string, unknown> | null = null;
     if (predResult.rows.length > 0) {
       const p = predResult.rows[0];
       prediction = {
@@ -198,7 +312,7 @@ export async function GET(request: Request) {
     }
 
     // Build lineup object
-    let lineup = null;
+    let lineup: Record<string, unknown> | null = null;
     if (lineupResult.rows.length > 0) {
       const l = lineupResult.rows[0];
       lineup = {
@@ -215,7 +329,7 @@ export async function GET(request: Request) {
     }
 
     // Build odds object
-    let odds = null;
+    let odds: Record<string, unknown> | null = null;
     if (oddsResult.rows.length > 0) {
       const o = oddsResult.rows[0];
       odds = {
@@ -253,6 +367,25 @@ export async function GET(request: Request) {
       args: [awayTeamId],
     });
 
+    // If no team profile and we have time, compute DNA on-the-fly
+    if (homeProfileResult.rows.length === 0 || awayProfileResult.rows.length === 0) {
+      try {
+        const { computeTeamDNA } = await import('@/engine/team-dna');
+        if (homeProfileResult.rows.length === 0) await computeTeamDNA(homeTeamId);
+        if (awayProfileResult.rows.length === 0) await computeTeamDNA(awayTeamId);
+      } catch { /* silent - not enough data yet */ }
+    }
+
+    // Re-fetch profiles after potential computation
+    const homeProfileFinal = homeProfileResult.rows.length > 0 ? homeProfileResult : await client.execute({
+      sql: 'SELECT * FROM team_profiles WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [homeTeamId],
+    });
+    const awayProfileFinal = awayProfileResult.rows.length > 0 ? awayProfileResult : await client.execute({
+      sql: 'SELECT * FROM team_profiles WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [awayTeamId],
+    });
+
     const homeTeamData = homeTeam.rows.length > 0 ? {
       id: homeTeam.rows[0].id,
       name: homeTeam.rows[0].name,
@@ -268,6 +401,42 @@ export async function GET(request: Request) {
       logo: awayTeam.rows[0].logo,
       country: awayTeam.rows[0].country,
     } : { id: awayTeamId, name: 'Unknown', shortName: null, logo: null, country: null };
+
+    // Parse stats for the frontend
+    let parsedStats: Record<string, unknown> | null = null;
+    if (statsResult.rows.length > 0) {
+      const s = statsResult.rows[0];
+      parsedStats = {
+        homeBallPossession: s.home_ball_possession,
+        homeTotalShots: s.home_total_shots,
+        homeShotsOnTarget: s.home_shots_on_target,
+        homeExpectedGoals: s.home_expected_goals,
+        homeCornerKicks: s.home_corner_kicks,
+        homeFouls: s.home_fouls,
+        homeYellowCards: s.home_yellow_cards,
+        homeAttacks: s.home_attacks,
+        homeDangerousAttacks: s.home_dangerous_attacks,
+        homeBigChances: s.home_big_chances,
+        homePasses: s.home_passes,
+        homePassAccuracy: s.home_pass_accuracy,
+        homeTackles: s.home_tackles,
+        homeInterceptions: s.home_interceptions,
+        awayBallPossession: s.away_ball_possession,
+        awayTotalShots: s.away_total_shots,
+        awayShotsOnTarget: s.away_shots_on_target,
+        awayExpectedGoals: s.away_expected_goals,
+        awayCornerKicks: s.away_corner_kicks,
+        awayFouls: s.away_fouls,
+        awayYellowCards: s.away_yellow_cards,
+        awayAttacks: s.away_attacks,
+        awayDangerousAttacks: s.away_dangerous_attacks,
+        awayBigChances: s.away_big_chances,
+        awayPasses: s.away_passes,
+        awayPassAccuracy: s.away_pass_accuracy,
+        awayTackles: s.away_tackles,
+        awayInterceptions: s.away_interceptions,
+      };
+    }
 
     const fixture = {
       id: f.id,
@@ -295,7 +464,7 @@ export async function GET(request: Request) {
       windSpeed: f.wind_speed,
       homeTeam: homeTeamData,
       awayTeam: awayTeamData,
-      stats: statsResult.rows.length > 0 ? statsResult.rows[0] : null,
+      stats: parsedStats,
       odds,
       lineup,
       prediction,
@@ -363,29 +532,29 @@ export async function GET(request: Request) {
         result: getFormResult(m, awayTeamId),
       })),
       // Team profiles
-      homeProfile: homeProfileResult.rows.length > 0 ? {
-        style: homeProfileResult.rows[0].style,
-        form: homeProfileResult.rows[0].form,
-        homeForm: homeProfileResult.rows[0].home_form,
-        awayForm: homeProfileResult.rows[0].away_form,
-        avgGoalsScored: homeProfileResult.rows[0].avg_goals_scored,
-        avgGoalsConceded: homeProfileResult.rows[0].avg_goals_conceded,
-        possession: homeProfileResult.rows[0].possession,
-        cleanSheetPct: homeProfileResult.rows[0].clean_sheet_pct,
-        bttsPct: homeProfileResult.rows[0].btts_pct,
-        over25Pct: homeProfileResult.rows[0].over_25_pct,
+      homeProfile: homeProfileFinal.rows.length > 0 ? {
+        style: homeProfileFinal.rows[0].style,
+        form: homeProfileFinal.rows[0].form,
+        homeForm: homeProfileFinal.rows[0].home_form,
+        awayForm: homeProfileFinal.rows[0].away_form,
+        avgGoalsScored: homeProfileFinal.rows[0].avg_goals_scored,
+        avgGoalsConceded: homeProfileFinal.rows[0].avg_goals_conceded,
+        possession: homeProfileFinal.rows[0].possession,
+        cleanSheetPct: homeProfileFinal.rows[0].clean_sheet_pct,
+        bttsPct: homeProfileFinal.rows[0].btts_pct,
+        over25Pct: homeProfileFinal.rows[0].over_25_pct,
       } : null,
-      awayProfile: awayProfileResult.rows.length > 0 ? {
-        style: awayProfileResult.rows[0].style,
-        form: awayProfileResult.rows[0].form,
-        homeForm: awayProfileResult.rows[0].home_form,
-        awayForm: awayProfileResult.rows[0].away_form,
-        avgGoalsScored: awayProfileResult.rows[0].avg_goals_scored,
-        avgGoalsConceded: awayProfileResult.rows[0].avg_goals_conceded,
-        possession: awayProfileResult.rows[0].possession,
-        cleanSheetPct: awayProfileResult.rows[0].clean_sheet_pct,
-        bttsPct: awayProfileResult.rows[0].btts_pct,
-        over25Pct: awayProfileResult.rows[0].over_25_pct,
+      awayProfile: awayProfileFinal.rows.length > 0 ? {
+        style: awayProfileFinal.rows[0].style,
+        form: awayProfileFinal.rows[0].form,
+        homeForm: awayProfileFinal.rows[0].home_form,
+        awayForm: awayProfileFinal.rows[0].away_form,
+        avgGoalsScored: awayProfileFinal.rows[0].avg_goals_scored,
+        avgGoalsConceded: awayProfileFinal.rows[0].avg_goals_conceded,
+        possession: awayProfileFinal.rows[0].possession,
+        cleanSheetPct: awayProfileFinal.rows[0].clean_sheet_pct,
+        bttsPct: awayProfileFinal.rows[0].btts_pct,
+        over25Pct: awayProfileFinal.rows[0].over_25_pct,
       } : null,
       // ELO ratings
       homeElo: homeEloResult.rows.length > 0 ? {

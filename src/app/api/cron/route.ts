@@ -4,7 +4,7 @@
 
 import { NextResponse } from 'next/server';
 import { client } from '@/lib/db-turso';
-import { fullDailySync, syncFixtures } from '@/lib/sync-service';
+import { fullDailySync, syncFixtures, deepSync } from '@/lib/sync-service';
 import { computeAllTeamDNA } from '@/engine/team-dna';
 import { predictUpcomingMatches, getTopPicks, settlePredictions } from '@/engine/prediction-engine';
 import { recalcLeagueElo, updateEloAfterMatch } from '@/engine/elo-system';
@@ -40,10 +40,10 @@ export async function POST(request: Request) {
           logs.push(`[Pipeline] Migration warning: ${err}`);
         }
 
-        // Step 2: Sync data from BSD API → Turso
+        // Step 2: Sync data from BSD API → Turso (now includes team history!)
         logs.push('[Pipeline] Step 2: Syncing data from BSD API...');
         const syncResult = await fullDailySync();
-        logs.push(`[Pipeline] Synced: ${syncResult.leagues} leagues, ${syncResult.fixtures} fixtures, ${syncResult.standings} standings`);
+        logs.push(`[Pipeline] Synced: ${syncResult.leagues} leagues, ${syncResult.fixtures} fixtures, ${syncResult.standings} standings, ${syncResult.teamHistories} team history fixtures`);
 
         // Step 3: Enrich — Compute team DNA from stored fixtures
         logs.push('[Pipeline] Step 3: Computing team DNA...');
@@ -116,12 +116,38 @@ export async function POST(request: Request) {
       }
 
       // ============================================================
+      // DEEP SYNC: Pull historical data for top leagues
+      // ============================================================
+      case 'deep-sync': {
+        const daysBack = body.daysBack || 60;
+        logs.push(`[Pipeline] Deep sync: pulling ${daysBack} days of history...`);
+
+        const deepResult = await deepSync(daysBack);
+        result = { deepSync: deepResult };
+        logs.push(`Deep sync: ${deepResult.leagues} leagues, ${deepResult.fixtures} fixtures, ${deepResult.standings} standings, ${deepResult.teamHistories} team histories`);
+
+        // Also compute DNA and ELO after deep sync
+        logs.push('[Pipeline] Computing DNA after deep sync...');
+        const dnaCount = await computeAllTeamDNA();
+        logs.push(`[Pipeline] Computed DNA for ${dnaCount} teams`);
+
+        const topLeagues = [17, 3, 9, 6, 13, 14, 30, 29, 34, 8];
+        for (const leagueId of topLeagues) {
+          try { await recalcLeagueElo(leagueId); } catch { /* skip */ }
+        }
+        logs.push('[Pipeline] ELO recalculated for top leagues');
+
+        result = { ...deepResult, dnaComputed: dnaCount };
+        break;
+      }
+
+      // ============================================================
       // SYNC ONLY: Just pull data from BSD API
       // ============================================================
       case 'sync': {
         const syncResult = await fullDailySync();
         result = { sync: syncResult };
-        logs.push(`Synced: ${syncResult.leagues} leagues, ${syncResult.fixtures} fixtures, ${syncResult.standings} standings`);
+        logs.push(`Synced: ${syncResult.leagues} leagues, ${syncResult.fixtures} fixtures, ${syncResult.standings} standings, ${syncResult.teamHistories} team histories`);
         break;
       }
 
@@ -205,7 +231,7 @@ export async function POST(request: Request) {
       }
 
       default:
-        return NextResponse.json({ error: 'Unknown action. Use: full, sync, enrich, predict, settle, live' }, { status: 400 });
+        return NextResponse.json({ error: 'Unknown action. Use: full, sync, deep-sync, enrich, predict, settle, live' }, { status: 400 });
     }
 
     const elapsed = Date.now() - startTime;
@@ -238,6 +264,9 @@ export async function GET() {
     const fixtureCount = await client.execute('SELECT COUNT(*) as cnt FROM fixtures');
     const predictionCount = await client.execute('SELECT COUNT(*) as cnt FROM predictions');
     const teamCount = await client.execute('SELECT COUNT(*) as cnt FROM teams');
+    const teamProfileCount = await client.execute('SELECT COUNT(*) as cnt FROM team_profiles');
+    const eloCount = await client.execute('SELECT COUNT(*) as cnt FROM team_elo');
+    const finishedCount = await client.execute("SELECT COUNT(*) as cnt FROM fixtures WHERE status = 'finished'");
 
     return NextResponse.json({
       status: 'healthy',
@@ -245,8 +274,11 @@ export async function GET() {
       database: {
         leagues: leagueCount.rows[0].cnt,
         fixtures: fixtureCount.rows[0].cnt,
+        finishedFixtures: finishedCount.rows[0].cnt,
         predictions: predictionCount.rows[0].cnt,
         teams: teamCount.rows[0].cnt,
+        teamProfiles: teamProfileCount.rows[0].cnt,
+        teamElo: eloCount.rows[0].cnt,
       },
     });
   } catch (error) {

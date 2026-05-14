@@ -337,8 +337,11 @@ function defaultFormFeatures(): FormFeatures {
 async function fetchFixture(fixtureId: number): Promise<FixtureRow | null> {
   try {
     const res = await client.execute({
-      sql: `SELECT f.*, l.name as league_name, l.country as league_country
+      sql: `SELECT f.*, ht.name as home_team_name, at.name as away_team_name,
+                   l.name as league_name, l.country as league_country
             FROM fixtures f
+            LEFT JOIN teams ht ON ht.id = f.home_team_id
+            LEFT JOIN teams at ON at.id = f.away_team_id
             LEFT JOIN leagues l ON l.id = f.league_id
             WHERE f.id = ?`,
       args: [fixtureId],

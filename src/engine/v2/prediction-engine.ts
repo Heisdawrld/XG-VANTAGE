@@ -389,6 +389,7 @@ function isValueBet(
 async function ensurePredictionsV2Table(): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS predictions_v2 (
+      prediction_id TEXT NOT NULL PRIMARY KEY,
       fixture_id INTEGER NOT NULL,
       home_team_id INTEGER NOT NULL,
       away_team_id INTEGER NOT NULL,
@@ -411,9 +412,10 @@ async function ensurePredictionsV2Table(): Promise<void> {
       top_scorelines TEXT NOT NULL DEFAULT '[]',
       engine_version TEXT NOT NULL DEFAULT '',
       data_quality TEXT NOT NULL DEFAULT 'partial',
-      prediction_id TEXT NOT NULL PRIMARY KEY,
       generated_at TEXT NOT NULL,
-      settled INTEGER NOT NULL DEFAULT 0
+      result TEXT DEFAULT 'pending',
+      settled INTEGER NOT NULL DEFAULT 0,
+      settled_at TEXT
     )
   `);
 }
@@ -507,8 +509,10 @@ export async function predictMatch(fixtureId: number): Promise<V2Prediction> {
   try {
     const fixtureRes = await client.execute({
       sql: `SELECT f.home_team_id, f.away_team_id, f.league_id,
-                   f.home_team_name, f.away_team_name, l.name as league_name
+                   ht.name as home_team_name, at.name as away_team_name, l.name as league_name
             FROM fixtures f
+            LEFT JOIN teams ht ON ht.id = f.home_team_id
+            LEFT JOIN teams at ON at.id = f.away_team_id
             LEFT JOIN leagues l ON l.id = f.league_id
             WHERE f.id = ?`,
       args: [fixtureId],
@@ -858,8 +862,10 @@ export async function getTopPicks(max: number = 10): Promise<V2Prediction[]> {
 
         try {
           const nameRes = await client.execute({
-            sql: `SELECT f.home_team_name, f.away_team_name, l.name as league_name
+            sql: `SELECT ht.name as home_team_name, at.name as away_team_name, l.name as league_name
                   FROM fixtures f
+                  LEFT JOIN teams ht ON ht.id = f.home_team_id
+                  LEFT JOIN teams at ON at.id = f.away_team_id
                   LEFT JOIN leagues l ON l.id = f.league_id
                   WHERE f.id = ?`,
             args: [fixtureId],

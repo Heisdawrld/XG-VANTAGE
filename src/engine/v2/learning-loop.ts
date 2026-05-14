@@ -75,10 +75,10 @@ async function ensureBrierTable(): Promise<void> {
   `);
 }
 
-/** Ensure the model_weights table exists */
+/** Ensure the v2_model_weights table exists */
 async function ensureModelWeightsTable(): Promise<void> {
   await client.execute(`
-    CREATE TABLE IF NOT EXISTS model_weights (
+    CREATE TABLE IF NOT EXISTS v2_model_weights (
       model_name TEXT NOT NULL PRIMARY KEY,
       weight REAL NOT NULL,
       last_adjusted TEXT NOT NULL,
@@ -114,14 +114,14 @@ async function ensurePredictionsTable(): Promise<void> {
 async function ensureDefaultWeights(): Promise<void> {
   await ensureModelWeightsTable();
 
-  const result = await client.execute('SELECT COUNT(*) as cnt FROM model_weights');
+  const result = await client.execute('SELECT COUNT(*) as cnt FROM v2_model_weights');
   const count = (result.rows[0]?.cnt as number) ?? 0;
 
   if (count === 0) {
     const now = new Date().toISOString();
     for (const [name, weight] of Object.entries(DEFAULT_MODEL_WEIGHTS)) {
       await client.execute({
-        sql: `INSERT INTO model_weights (model_name, weight, last_adjusted, adjustment_reason)
+        sql: `INSERT INTO v2_model_weights (model_name, weight, last_adjusted, adjustment_reason)
               VALUES (?, ?, ?, ?)`,
         args: [name, weight, now, 'initial_default'],
       });
@@ -274,7 +274,7 @@ export async function settlePrediction(
 
     // ── 2. Get fixture result ──────────────────────────────────────────────
     const fixtureResult = await client.execute({
-      sql: `SELECT id, home_score, away_score, match_status
+      sql: `SELECT id, home_score, away_score, status
             FROM fixtures
             WHERE id = ?`,
       args: [fixtureId],
@@ -553,7 +553,7 @@ export async function getModelPerformance(): Promise<ModelPerformance> {
 
     // ── Last retrained ─────────────────────────────────────────────────────
     const lastAdjustedResult = await client.execute(
-      `SELECT MAX(last_adjusted) as last_adj FROM model_weights`
+      `SELECT MAX(last_adjusted) as last_adj FROM v2_model_weights`
     );
     const lastRetrained = (lastAdjustedResult.rows[0]?.last_adj as string)
       ?? new Date().toISOString();
@@ -617,7 +617,7 @@ export async function adjustModelWeights(): Promise<void> {
 
     // ── 2. Get current weights from DB ─────────────────────────────────────
     const weightsResult = await client.execute(
-      `SELECT model_name, weight FROM model_weights`
+      `SELECT model_name, weight FROM v2_model_weights`
     );
 
     const weights: Record<string, number> = {};
@@ -732,7 +732,7 @@ export async function adjustModelWeights(): Promise<void> {
 
     for (const [name, weight] of Object.entries(weights)) {
       await client.execute({
-        sql: `UPDATE model_weights
+        sql: `UPDATE v2_model_weights
               SET weight = ?, last_adjusted = ?, adjustment_reason = ?
               WHERE model_name = ?`,
         args: [weight, now, reason, name],
@@ -822,7 +822,7 @@ export async function getModelWeights(): Promise<Record<string, number>> {
     await ensureDefaultWeights();
 
     const result = await client.execute(
-      `SELECT model_name, weight FROM model_weights`
+      `SELECT model_name, weight FROM v2_model_weights`
     );
 
     if (result.rows.length === 0) {

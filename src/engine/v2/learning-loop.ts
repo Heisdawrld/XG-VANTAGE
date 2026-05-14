@@ -87,25 +87,37 @@ async function ensureModelWeightsTable(): Promise<void> {
   `);
 }
 
-/** Ensure the predictions table has the columns we need */
-async function ensurePredictionsTable(): Promise<void> {
+/** Ensure the predictions_v2 table has the columns we need for settlement */
+async function ensurePredictionsV2Table(): Promise<void> {
   await client.execute(`
-    CREATE TABLE IF NOT EXISTS predictions (
-      id TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS predictions_v2 (
+      prediction_id TEXT NOT NULL PRIMARY KEY,
       fixture_id INTEGER NOT NULL,
       home_team_id INTEGER NOT NULL,
       away_team_id INTEGER NOT NULL,
       league_id INTEGER NOT NULL,
-      pick_market TEXT NOT NULL DEFAULT '',
-      pick_selection TEXT NOT NULL DEFAULT '',
-      predicted_prob REAL NOT NULL DEFAULT 0.0,
-      confidence REAL NOT NULL DEFAULT 0.0,
+      pick_type TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
       tier TEXT NOT NULL DEFAULT 'medium',
-      risk_class TEXT NOT NULL DEFAULT 'MODERATE',
+      xg_home REAL NOT NULL DEFAULT 0,
+      xg_away REAL NOT NULL DEFAULT 0,
+      script TEXT NOT NULL DEFAULT '',
+      calibrated_probs TEXT NOT NULL DEFAULT '{}',
+      market_selection TEXT NOT NULL DEFAULT '{}',
+      feature_vector TEXT NOT NULL DEFAULT '{}',
+      confidence_profile TEXT NOT NULL DEFAULT '{}',
+      key_reasons TEXT NOT NULL DEFAULT '[]',
+      contradicting_reasons TEXT NOT NULL DEFAULT '[]',
+      tactical_matchup TEXT NOT NULL DEFAULT '',
+      safe_bet INTEGER NOT NULL DEFAULT 0,
+      value_bet INTEGER NOT NULL DEFAULT 0,
+      top_scorelines TEXT NOT NULL DEFAULT '[]',
       engine_version TEXT NOT NULL DEFAULT '',
-      payload TEXT NOT NULL DEFAULT '{}',
-      created_at TEXT NOT NULL,
-      settled INTEGER NOT NULL DEFAULT 0
+      data_quality TEXT NOT NULL DEFAULT 'partial',
+      generated_at TEXT NOT NULL,
+      result TEXT DEFAULT 'pending',
+      settled INTEGER NOT NULL DEFAULT 0,
+      settled_at TEXT
     )
   `);
 }
@@ -250,14 +262,14 @@ export async function settlePrediction(
   fixtureId: number,
 ): Promise<LearningFeedback | null> {
   try {
-    await ensurePredictionsTable();
+    await ensurePredictionsV2Table();
     await ensureFeedbackTable();
 
-    // ── 1. Get prediction from DB ─────────────────────────────────────────
+    // ── 1. Get prediction from predictions_v2 ─────────────────────────────
     const predResult = await client.execute({
-      sql: `SELECT fixture_id, pick_market, pick_selection, predicted_prob,
-                   confidence, tier, risk_class
-            FROM predictions
+      sql: `SELECT fixture_id, pick_type, confidence, tier, market_selection,
+                   calibrated_probs, xg_home, xg_away
+            FROM predictions_v2
             WHERE fixture_id = ? AND settled = 0`,
       args: [fixtureId],
     });
@@ -267,8 +279,9 @@ export async function settlePrediction(
     }
 
     const pred = predResult.rows[0];
-    const marketKey = pred.pick_market as string;
-    const predictedProb = pred.predicted_prob as number;
+    const marketSelection = JSON.parse(String(pred.market_selection ?? '{}'));
+    const marketKey = marketSelection?.bestPick?.marketKey ?? String(pred.pick_type ?? '');
+    const predictedProb = marketSelection?.bestPick?.probability ?? (pred.confidence as number) / 100;
     const confidence = pred.confidence as number;
     const pickType = pred.tier as string;
 
@@ -342,8 +355,8 @@ export async function settlePrediction(
 
     // ── 8. Mark prediction as settled ───────────────────────────────────────
     await client.execute({
-      sql: `UPDATE predictions SET settled = 1 WHERE fixture_id = ?`,
-      args: [fixtureId],
+      sql: `UPDATE predictions_v2 SET settled = 1, result = ?, settled_at = ? WHERE fixture_id = ?`,
+      args: [wasCorrect ? 'won' : 'lost', now, fixtureId],
     });
 
     return {
@@ -373,14 +386,15 @@ export async function settlePrediction(
  */
 export async function settleAllPending(): Promise<{ settled: number; failed: number }> {
   try {
-    await ensurePredictionsTable();
+    await ensurePredictionsV2Table();
 
-    // Find all unsettled predictions
+    // Find all unsettled predictions from predictions_v2
     const pendingResult = await client.execute({
       sql: `SELECT p.fixture_id
-            FROM predictions p
+            FROM predictions_v2 p
             INNER JOIN fixtures f ON p.fixture_id = f.id
             WHERE p.settled = 0
+              AND f.status = 'finished'
               AND f.home_score IS NOT NULL
               AND f.away_score IS NOT NULL`,
       args: [],
@@ -428,6 +442,8 @@ export async function settleAllPending(): Promise<{ settled: number; failed: num
 export async function getModelPerformance(): Promise<ModelPerformance> {
   try {
     await ensureFeedbackTable();
+    await ensureModelWeightsTable();
+    await ensureDefaultWeights();
 
     // ── Overall accuracy ───────────────────────────────────────────────────
     const overallResult = await client.execute(`

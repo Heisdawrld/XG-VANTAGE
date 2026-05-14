@@ -6,6 +6,58 @@ export async function migrate() {
   console.log('Running migrations...');
 
   // ========================================================================
+  // PRE-MIGRATION: Drop tables with wrong schemas so CREATE TABLE IF NOT EXISTS
+  // will recreate them with the correct schema.
+  // This MUST run before the CREATE TABLE statements below.
+  // ========================================================================
+
+  // Check predictions_v2 — if it has fixture_id as PK instead of prediction_id, or
+  // is missing xg_home/xg_away columns, drop it so it gets recreated properly.
+  try {
+    const v2Cols = await client.execute({
+      sql: "SELECT name FROM pragma_table_info('predictions_v2')",
+      args: [],
+    });
+    const colNames = v2Cols.rows.map(r => r.name as string);
+    if (colNames.length > 0 && (!colNames.includes('xg_home') || !colNames.includes('prediction_id'))) {
+      console.log('[Migration] predictions_v2 has wrong schema — dropping for rebuild...');
+      await client.execute('DROP TABLE predictions_v2');
+    }
+  } catch {
+    // Table doesn't exist yet — that's fine, it will be created below
+  }
+
+  // Check team_glicko — if it has matches_played instead of match_count, drop it
+  try {
+    const glickoCols = await client.execute({
+      sql: "SELECT name FROM pragma_table_info('team_glicko')",
+      args: [],
+    });
+    const glickoColNames = glickoCols.rows.map(r => r.name as string);
+    if (glickoColNames.length > 0 && !glickoColNames.includes('match_count')) {
+      console.log('[Migration] team_glicko has wrong schema — dropping for rebuild...');
+      await client.execute('DROP TABLE team_glicko');
+    }
+  } catch {
+    // Table doesn't exist yet
+  }
+
+  // Check brier_scores — if missing last_updated, drop it
+  try {
+    const brierCols = await client.execute({
+      sql: "SELECT name FROM pragma_table_info('brier_scores')",
+      args: [],
+    });
+    const brierColNames = brierCols.rows.map(r => r.name as string);
+    if (brierColNames.length > 0 && !brierColNames.includes('last_updated')) {
+      console.log('[Migration] brier_scores has wrong schema — dropping for rebuild...');
+      await client.execute('DROP TABLE brier_scores');
+    }
+  } catch {
+    // Table doesn't exist yet
+  }
+
+  // ========================================================================
   // CORE TABLES
   // ========================================================================
 

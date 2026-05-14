@@ -387,6 +387,21 @@ function isValueBet(
 // ============================================================================
 
 async function ensurePredictionsV2Table(): Promise<void> {
+  // First check if the table has the correct schema (must have xg_home and prediction_id columns)
+  try {
+    const cols = await client.execute({
+      sql: "SELECT name FROM pragma_table_info('predictions_v2')",
+      args: [],
+    });
+    const colNames = cols.rows.map(r => r.name as string);
+    if (colNames.length > 0 && (!colNames.includes('xg_home') || !colNames.includes('prediction_id'))) {
+      console.log('[prediction-engine] predictions_v2 has wrong schema — dropping and recreating...');
+      await client.execute('DROP TABLE predictions_v2');
+    }
+  } catch {
+    // Table doesn't exist yet — that's fine
+  }
+
   await client.execute(`
     CREATE TABLE IF NOT EXISTS predictions_v2 (
       prediction_id TEXT NOT NULL PRIMARY KEY,

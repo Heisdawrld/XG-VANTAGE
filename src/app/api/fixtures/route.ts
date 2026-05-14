@@ -97,7 +97,7 @@ export async function GET(request: Request) {
         bttsNoProb: row.btts_no_prob ? Number(row.btts_no_prob) : undefined,
         homeXg: row.home_xg ? Number(row.home_xg) : undefined,
         awayXg: row.away_xg ? Number(row.away_xg) : undefined,
-        confidence: Number(row.pred_confidence),
+        confidence: Number(row.pred_confidence) / 100, // 0-1 range for frontend
         tier: row.tier,
         verdict: row.verdict,
         phantomScore: row.phantom_score ? Number(row.phantom_score) : undefined,

@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { getTopPicks } from '@/engine/prediction-engine';
 import { client } from '@/lib/db-turso';
 
 export async function GET(request: Request) {
@@ -10,109 +9,58 @@ export async function GET(request: Request) {
     const today = new Date().toISOString().split('T')[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
-    // First try to get existing predictions from DB
+    // Get top predictions from DB — confidence is stored as percentage (e.g. 53.1)
+    // Lower threshold to 40% to include more picks, sorted by confidence desc
     const result = await client.execute({
-      sql: `SELECT p.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id,
+      sql: `SELECT p.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id, f.status,
                    ht.name as home_team_name, at.name as away_team_name,
+                   l.name as league_name,
                    o.home_win, o.draw as odds_draw, o.away_win, o.over_25_goals, o.btts_yes
             FROM predictions p
             JOIN fixtures f ON p.fixture_id = f.id
             LEFT JOIN teams ht ON f.home_team_id = ht.id
             LEFT JOIN teams at ON f.away_team_id = at.id
+            LEFT JOIN leagues l ON f.league_id = l.id
             LEFT JOIN fixture_odds o ON o.fixture_id = f.id
-            WHERE f.event_date >= ? AND f.event_date < ? AND f.status = 'notstarted'
-              AND p.confidence >= 55
+            WHERE f.event_date >= ? AND f.event_date < ? AND f.status IN ('notstarted', 'inprogress')
             ORDER BY p.confidence DESC LIMIT ?`,
       args: [today, tomorrow, limit],
     });
 
-    let picks = result.rows.map((p, i) => ({
+    const picks = result.rows.map((p, i) => ({
       rank: i + 1,
-      fixtureId: p.fixture_id,
-      homeTeam: p.home_team_name,
-      awayTeam: p.away_team_name,
-      homeTeamId: p.home_team_id,
-      awayTeamId: p.away_team_id,
-      eventDate: p.event_date,
-      leagueId: p.league_id,
-      pickType: p.pick_type,
-      pickLabel: p.pick_label,
-      confidence: p.confidence,
-      tier: p.tier,
-      verdict: p.verdict,
-      homeWinProb: p.home_win_prob,
-      drawProb: p.draw_prob,
-      awayWinProb: p.away_win_prob,
-      over25Prob: p.over_25_prob,
-      bttsYesProb: p.btts_yes_prob,
-      homeXg: p.home_xg,
-      awayXg: p.away_xg,
-      edge: p.edge,
-      recommendedBet: p.pick_label,
+      fixtureId: p.fixture_id as number,
+      homeTeam: (p.home_team_name as string) || 'Home',
+      awayTeam: (p.away_team_name as string) || 'Away',
+      homeTeamId: p.home_team_id as number,
+      awayTeamId: p.away_team_id as number,
+      eventDate: p.event_date as string,
+      leagueId: p.league_id as number,
+      leagueName: p.league_name as string,
+      pickType: p.pick_type as string,
+      pickLabel: p.pick_label as string,
+      confidence: (p.confidence as number) / 100, // Convert to 0-1 range for frontend
+      tier: p.tier as string,
+      verdict: p.verdict as string,
+      homeWinProb: p.home_win_prob as number,
+      drawProb: p.draw_prob as number,
+      awayWinProb: p.away_win_prob as number,
+      over25Prob: p.over_25_prob as number,
+      bttsYesProb: p.btts_yes_prob as number,
+      homeXg: p.home_xg as number,
+      awayXg: p.away_xg as number,
+      edge: p.edge as number,
+      recommendedBet: p.pick_label as string,
       valueDetected: (p.edge as number) > 5,
-      valueEdge: p.edge,
+      valueEdge: p.edge as number,
       odds: {
-        homeWin: p.home_win,
-        draw: p.odds_draw,
-        awayWin: p.away_win,
-        over25: p.over_25_goals,
-        bttsYes: p.btts_yes,
+        homeWin: (p.home_win as number) ?? null,
+        draw: (p.odds_draw as number) ?? null,
+        awayWin: (p.away_win as number) ?? null,
+        over25: (p.over_25_goals as number) ?? null,
+        bttsYes: (p.btts_yes as number) ?? null,
       },
     }));
-
-    // If no picks in DB, generate them
-    if (picks.length === 0) {
-      const generated = await getTopPicks(limit);
-      // Re-fetch from DB after generation
-      const result2 = await client.execute({
-        sql: `SELECT p.*, f.event_date, f.home_team_id, f.away_team_id, f.league_id,
-                     ht.name as home_team_name, at.name as away_team_name,
-                     o.home_win, o.draw as odds_draw, o.away_win, o.over_25_goals, o.btts_yes
-              FROM predictions p
-              JOIN fixtures f ON p.fixture_id = f.id
-              LEFT JOIN teams ht ON f.home_team_id = ht.id
-              LEFT JOIN teams at ON f.away_team_id = at.id
-              LEFT JOIN fixture_odds o ON o.fixture_id = f.id
-              WHERE f.event_date >= ? AND f.event_date < ? AND f.status = 'notstarted'
-                AND p.confidence >= 55
-              ORDER BY p.confidence DESC LIMIT ?`,
-        args: [today, tomorrow, limit],
-      });
-
-      picks = result2.rows.map((p, i) => ({
-        rank: i + 1,
-        fixtureId: p.fixture_id,
-        homeTeam: p.home_team_name,
-        awayTeam: p.away_team_name,
-        homeTeamId: p.home_team_id,
-        awayTeamId: p.away_team_id,
-        eventDate: p.event_date,
-        leagueId: p.league_id,
-        pickType: p.pick_type,
-        pickLabel: p.pick_label,
-        confidence: p.confidence,
-        tier: p.tier,
-        verdict: p.verdict,
-        homeWinProb: p.home_win_prob,
-        drawProb: p.draw_prob,
-        awayWinProb: p.away_win_prob,
-        over25Prob: p.over_25_prob,
-        bttsYesProb: p.btts_yes_prob,
-        homeXg: p.home_xg,
-        awayXg: p.away_xg,
-        edge: p.edge,
-        recommendedBet: p.pick_label,
-        valueDetected: (p.edge as number) > 5,
-        valueEdge: p.edge,
-        odds: {
-          homeWin: p.home_win,
-          draw: p.odds_draw,
-          awayWin: p.away_win,
-          over25: p.over_25_goals,
-          bttsYes: p.btts_yes,
-        },
-      }));
-    }
 
     return NextResponse.json({
       date: today,
@@ -121,6 +69,6 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error('[API] Picks error:', error);
-    return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+    return NextResponse.json({ date: new Date().toISOString().split('T')[0], count: 0, picks: [], error: String(error) }, { status: 500 });
   }
 }

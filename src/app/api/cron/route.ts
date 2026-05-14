@@ -327,39 +327,58 @@ export async function POST(request: Request) {
 // Also allow GET for simple health check
 export async function GET() {
   try {
-    const leagueCount = await client.execute('SELECT COUNT(*) as cnt FROM leagues');
-    const fixtureCount = await client.execute('SELECT COUNT(*) as cnt FROM fixtures');
-    const predictionCount = await client.execute('SELECT COUNT(*) as cnt FROM predictions');
-    const predictionV2Count = await client.execute('SELECT COUNT(*) as cnt FROM predictions_v2');
-    const teamCount = await client.execute('SELECT COUNT(*) as cnt FROM teams');
-    const teamProfileCount = await client.execute('SELECT COUNT(*) as cnt FROM team_profiles');
-    const eloCount = await client.execute('SELECT COUNT(*) as cnt FROM team_elo');
-    const glickoCount = await client.execute('SELECT COUNT(*) as cnt FROM team_glicko');
-    const finishedCount = await client.execute("SELECT COUNT(*) as cnt FROM fixtures WHERE status = 'finished'");
-    const feedbackCount = await client.execute('SELECT COUNT(*) as cnt FROM prediction_feedback');
-    const calibrationCount = await client.execute('SELECT COUNT(*) as cnt FROM calibration_bins');
+    // Helper to safely count rows (handles missing tables gracefully)
+    const safeCount = async (table: string): Promise<number> => {
+      try {
+        const result = await client.execute(`SELECT COUNT(*) as cnt FROM ${table}`);
+        return result.rows[0]?.cnt as number ?? 0;
+      } catch {
+        return -1; // Table doesn't exist yet
+      }
+    };
+
+    const leagueCount = await safeCount('leagues');
+    const fixtureCount = await safeCount('fixtures');
+    const predictionCount = await safeCount('predictions');
+    const predictionV2Count = await safeCount('predictions_v2');
+    const teamCount = await safeCount('teams');
+    const teamProfileCount = await safeCount('team_profiles');
+    const eloCount = await safeCount('team_elo');
+    const glickoCount = await safeCount('team_glicko');
+    const finishedCount = await safeCount('fixtures'); // will recount below
+    const feedbackCount = await safeCount('prediction_feedback');
+    const calibrationCount = await safeCount('calibration_bins');
+
+    let finishedFixtures = 0;
+    try {
+      const fin = await client.execute("SELECT COUNT(*) as cnt FROM fixtures WHERE status = 'finished'");
+      finishedFixtures = fin.rows[0]?.cnt as number ?? 0;
+    } catch { /* ignore */ }
 
     let modelPerformance: Awaited<ReturnType<typeof getModelPerformance>> | null = null;
     try {
       modelPerformance = await getModelPerformance();
     } catch { /* not enough data yet */ }
 
+    const needsMigration = predictionV2Count === -1 || glickoCount === -1 || feedbackCount === -1;
+
     return NextResponse.json({
-      status: 'healthy',
+      status: needsMigration ? 'needs_migration' : 'healthy',
       engine: 'v3',
       timestamp: new Date().toISOString(),
+      needsMigration,
       database: {
-        leagues: leagueCount.rows[0].cnt,
-        fixtures: fixtureCount.rows[0].cnt,
-        finishedFixtures: finishedCount.rows[0].cnt,
-        predictionsV1: predictionCount.rows[0].cnt,
-        predictionsV2: predictionV2Count.rows[0].cnt,
-        teams: teamCount.rows[0].cnt,
-        teamProfiles: teamProfileCount.rows[0].cnt,
-        teamElo: eloCount.rows[0].cnt,
-        teamGlicko: glickoCount.rows[0].cnt,
-        feedbackEntries: feedbackCount.rows[0].cnt,
-        calibrationBins: calibrationCount.rows[0].cnt,
+        leagues: leagueCount,
+        fixtures: fixtureCount,
+        finishedFixtures,
+        predictionsV1: predictionCount,
+        predictionsV2: predictionV2Count,
+        teams: teamCount,
+        teamProfiles: teamProfileCount,
+        teamElo: eloCount,
+        teamGlicko: glickoCount,
+        feedbackEntries: feedbackCount,
+        calibrationBins: calibrationCount,
       },
       modelPerformance: modelPerformance ? {
         accuracy: `${(modelPerformance.overallAccuracy * 100).toFixed(1)}%`,
@@ -367,11 +386,13 @@ export async function GET() {
         totalSettled: modelPerformance.totalSettled,
         calibrationDrift: modelPerformance.calibrationDrift.toFixed(4),
       } : null,
+      hint: needsMigration ? 'Run POST /api/cron with action=full to create V2 tables and sync data' : undefined,
     });
   } catch (error) {
     return NextResponse.json({
       status: 'unhealthy',
       error: String(error),
+      hint: 'Run POST /api/cron with action=full to initialize database',
     }, { status: 503 });
   }
 }

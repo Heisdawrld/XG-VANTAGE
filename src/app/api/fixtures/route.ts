@@ -156,7 +156,8 @@ export async function GET(request: Request) {
         homeFormation: row.home_formation,
         awayFormation: row.away_formation,
       } : null,
-    }));
+    };
+    });
 
     // Group by league
     const leagueMap: Record<number, string> = {};

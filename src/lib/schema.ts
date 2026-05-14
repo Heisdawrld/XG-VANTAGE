@@ -292,3 +292,21 @@ export const teamElo = sqliteTable('team_elo', {
   lastMatchDate: text('last_match_date'),
   updatedAt: text('updated_at').default('CURRENT_TIMESTAMP'),
 });
+
+export const teamGlicko = sqliteTable('team_glicko', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  teamId: integer('team_id').notNull(),
+  leagueId: integer('league_id').notNull().default(0),
+  seasonId: integer('season_id').notNull().default(0),
+  rating: real('rating').notNull().default(1500),
+  deviation: real('deviation').notNull().default(350),
+  volatility: real('volatility').notNull().default(0.06),
+  homeRating: real('home_rating').notNull().default(1500),
+  homeDeviation: real('home_deviation').notNull().default(350),
+  awayRating: real('away_rating').notNull().default(1500),
+  awayDeviation: real('away_deviation').notNull().default(350),
+  matchCount: integer('match_count').notNull().default(0),
+  lastMatchDate: text('last_match_date'),
+  createdAt: text('created_at').notNull().default("datetime('now')"),
+  updatedAt: text('updated_at').notNull().default("datetime('now')"),
+});

@@ -111,8 +111,12 @@ export async function GET(request: Request) {
     // Get lineup
     const lineupResult = await client.execute({ sql: 'SELECT * FROM fixture_lineups WHERE fixture_id = ?', args: [fixtureId] });
 
-    // Get prediction with full data
-    const predResult = await client.execute({ sql: 'SELECT * FROM predictions WHERE fixture_id = ?', args: [fixtureId] });
+    // Get prediction with full data — try V2 first, then V1
+    let predResult = await client.execute({ sql: 'SELECT * FROM predictions_v2 WHERE fixture_id = ?', args: [fixtureId] });
+    const isV2Prediction = predResult.rows.length > 0;
+    if (!isV2Prediction) {
+      predResult = await client.execute({ sql: 'SELECT * FROM predictions WHERE fixture_id = ?', args: [fixtureId] });
+    }
 
     // Get league name
     const leagueResult = f.league_id ? await client.execute({
@@ -280,35 +284,94 @@ export async function GET(request: Request) {
     let prediction: Record<string, unknown> | null = null;
     if (predResult.rows.length > 0) {
       const p = predResult.rows[0];
-      prediction = {
-        pickType: p.pick_type,
-        pickLabel: p.pick_label,
-        confidence: p.confidence,
-        tier: p.tier,
-        phantomScore: p.phantom_score,
-        edge: p.edge,
-        homeWinProb: p.home_win_prob,
-        drawProb: p.draw_prob,
-        awayWinProb: p.away_win_prob,
-        over25Prob: p.over_25_prob,
-        under25Prob: p.under_25_prob,
-        bttsYesProb: p.btts_yes_prob,
-        bttsNoProb: p.btts_no_prob,
-        homeXg: p.home_xg,
-        awayXg: p.away_xg,
-        verdict: p.verdict,
-        decisionStack: p.decision_stack ? JSON.parse(p.decision_stack as string) : null,
-        keyReasons: p.key_reasons ? JSON.parse(p.key_reasons as string) : [],
-        tacticalMatchup: p.tactical_matchup ? JSON.parse(p.tactical_matchup as string) : null,
-        odds: p.odds_json ? JSON.parse(p.odds_json as string) : null,
-        result: p.result,
-        probHomeWin: p.home_win_prob,
-        probDraw: p.draw_prob,
-        probAwayWin: p.away_win_prob,
-        valueDetected: (p.edge as number) > 5,
-        valueEdge: p.edge,
-        recommendedBet: p.pick_label,
-      };
+      if (isV2Prediction) {
+        // V2 prediction — much richer data
+        const calibratedProbs = p.calibrated_probs ? JSON.parse(p.calibrated_probs as string) : {};
+        const marketSelection = p.market_selection ? JSON.parse(p.market_selection as string) : {};
+        const confidenceProfile = p.confidence_profile ? JSON.parse(p.confidence_profile as string) : {};
+        const topScorelines = p.top_scorelines ? JSON.parse(p.top_scorelines as string) : [];
+        const keyReasons = p.key_reasons ? JSON.parse(p.key_reasons as string) : [];
+        const contradictingReasons = p.contradicting_reasons ? JSON.parse(p.contradicting_reasons as string) : [];
+
+        prediction = {
+          engineVersion: 'v2',
+          pickType: p.pick_type,
+          pickLabel: p.pick_label,
+          confidence: p.confidence,
+          tier: p.tier,
+          edge: p.edge,
+          script: p.script,
+          homeXg: p.home_xg,
+          awayXg: p.away_xg,
+          safeBet: p.safe_bet === 1,
+          valueBet: p.value_bet === 1,
+          dataQuality: p.data_quality,
+          enrichmentTier: p.enrichment_tier,
+          tacticalMatchup: p.tactical_matchup,
+          // Probability breakdown (calibrated)
+          homeWinProb: calibratedProbs.homeWin ?? null,
+          drawProb: calibratedProbs.draw ?? null,
+          awayWinProb: calibratedProbs.awayWin ?? null,
+          over25Prob: calibratedProbs.over25 ?? null,
+          under25Prob: calibratedProbs.under25 ?? null,
+          over15Prob: calibratedProbs.over15 ?? null,
+          bttsYesProb: calibratedProbs.bttsYes ?? null,
+          bttsNoProb: calibratedProbs.bttsNo ?? null,
+          // Market selection
+          bestPick: marketSelection.bestPick ?? null,
+          allCandidates: marketSelection.allCandidates ?? [],
+          abstained: marketSelection.abstained ?? false,
+          abstentionReason: marketSelection.abstentionReason ?? null,
+          layer2Override: marketSelection.layer2Override ?? false,
+          // Confidence profile
+          confidenceProfile: confidenceProfile,
+          // Key reasons
+          keyReasons: keyReasons,
+          contradictingReasons: contradictingReasons,
+          // Top scorelines
+          topScorelines: topScorelines,
+          // Value detection (legacy compat)
+          probHomeWin: calibratedProbs.homeWin ?? null,
+          probDraw: calibratedProbs.draw ?? null,
+          probAwayWin: calibratedProbs.awayWin ?? null,
+          valueDetected: (p.edge as number) > 5,
+          valueEdge: p.edge,
+          recommendedBet: p.pick_label,
+          result: p.result,
+        };
+      } else {
+        // V1 prediction — original format
+        prediction = {
+          engineVersion: 'v1',
+          pickType: p.pick_type,
+          pickLabel: p.pick_label,
+          confidence: p.confidence,
+          tier: p.tier,
+          phantomScore: p.phantom_score,
+          edge: p.edge,
+          homeWinProb: p.home_win_prob,
+          drawProb: p.draw_prob,
+          awayWinProb: p.away_win_prob,
+          over25Prob: p.over_25_prob,
+          under25Prob: p.under_25_prob,
+          bttsYesProb: p.btts_yes_prob,
+          bttsNoProb: p.btts_no_prob,
+          homeXg: p.home_xg,
+          awayXg: p.away_xg,
+          verdict: p.verdict,
+          decisionStack: p.decision_stack ? JSON.parse(p.decision_stack as string) : null,
+          keyReasons: p.key_reasons ? JSON.parse(p.key_reasons as string) : [],
+          tacticalMatchup: p.tactical_matchup ? JSON.parse(p.tactical_matchup as string) : null,
+          odds: p.odds_json ? JSON.parse(p.odds_json as string) : null,
+          result: p.result,
+          probHomeWin: p.home_win_prob,
+          probDraw: p.draw_prob,
+          probAwayWin: p.away_win_prob,
+          valueDetected: (p.edge as number) > 5,
+          valueEdge: p.edge,
+          recommendedBet: p.pick_label,
+        };
+      }
     }
 
     // Build lineup object
@@ -364,6 +427,16 @@ export async function GET(request: Request) {
     });
     const awayEloResult = await client.execute({
       sql: 'SELECT * FROM team_elo WHERE team_id = ? ORDER BY updated_at DESC LIMIT 1',
+      args: [awayTeamId],
+    });
+
+    // Get V2 Glicko (Bayesian ELO) ratings if available
+    const homeGlickoResult = await client.execute({
+      sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
+      args: [homeTeamId],
+    });
+    const awayGlickoResult = await client.execute({
+      sql: 'SELECT * FROM team_glicko WHERE team_id = ?',
       args: [awayTeamId],
     });
 
@@ -566,6 +639,23 @@ export async function GET(request: Request) {
         overall: awayEloResult.rows[0].elo_rating,
         home: awayEloResult.rows[0].elo_home_rating,
         away: awayEloResult.rows[0].elo_away_rating,
+      } : null,
+      // V2 Glicko (Bayesian ELO) ratings with uncertainty
+      homeGlicko: homeGlickoResult.rows.length > 0 ? {
+        rating: homeGlickoResult.rows[0].rating,
+        deviation: homeGlickoResult.rows[0].rating_deviation,
+        volatility: homeGlickoResult.rows[0].volatility,
+        homeRating: homeGlickoResult.rows[0].home_rating,
+        awayRating: homeGlickoResult.rows[0].away_rating,
+        matchesPlayed: homeGlickoResult.rows[0].matches_played,
+      } : null,
+      awayGlicko: awayGlickoResult.rows.length > 0 ? {
+        rating: awayGlickoResult.rows[0].rating,
+        deviation: awayGlickoResult.rows[0].rating_deviation,
+        volatility: awayGlickoResult.rows[0].volatility,
+        homeRating: awayGlickoResult.rows[0].home_rating,
+        awayRating: awayGlickoResult.rows[0].away_rating,
+        matchesPlayed: awayGlickoResult.rows[0].matches_played,
       } : null,
     };
 

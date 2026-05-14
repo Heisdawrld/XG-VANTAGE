@@ -329,6 +329,101 @@ export async function migrate() {
     );
   `);
 
+  // ========================================================================
+  // V2 ENGINE TABLES
+  // ========================================================================
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS predictions_v2 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fixture_id INTEGER REFERENCES fixtures(id) UNIQUE,
+      home_team_id INTEGER,
+      away_team_id INTEGER,
+      league_id INTEGER,
+      pick_type TEXT,
+      pick_label TEXT,
+      confidence REAL,
+      tier TEXT,
+      edge REAL,
+      home_xg REAL,
+      away_xg REAL,
+      script TEXT,
+      data_quality TEXT,
+      enrichment_tier TEXT,
+      safe_bet INTEGER DEFAULT 0,
+      value_bet INTEGER DEFAULT 0,
+      tactical_matchup TEXT,
+      key_reasons TEXT,
+      contradicting_reasons TEXT,
+      calibrated_probs TEXT,
+      market_selection TEXT,
+      feature_vector TEXT,
+      confidence_profile TEXT,
+      top_scorelines TEXT,
+      engine_version TEXT,
+      prediction_id TEXT UNIQUE,
+      result TEXT DEFAULT 'pending',
+      settled_at TEXT,
+      generated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS team_glicko (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id INTEGER UNIQUE,
+      league_id INTEGER,
+      rating REAL DEFAULT 1500,
+      rating_deviation REAL DEFAULT 350,
+      volatility REAL DEFAULT 0.06,
+      home_rating REAL DEFAULT 1500,
+      home_deviation REAL DEFAULT 350,
+      away_rating REAL DEFAULT 1500,
+      away_deviation REAL DEFAULT 350,
+      matches_played INTEGER DEFAULT 0,
+      last_match_date TEXT,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS prediction_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fixture_id INTEGER REFERENCES fixtures(id),
+      was_correct INTEGER,
+      pick_type TEXT,
+      confidence REAL,
+      actual_result TEXT,
+      predicted_prob REAL,
+      market_key TEXT,
+      brier_contribution REAL,
+      settled_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS calibration_bins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      market_key TEXT NOT NULL,
+      bin_lower REAL NOT NULL,
+      bin_upper REAL NOT NULL,
+      predicted_count INTEGER DEFAULT 0,
+      actual_count INTEGER DEFAULT 0,
+      actual_rate REAL DEFAULT 0,
+      last_updated TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS brier_scores (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      market_key TEXT UNIQUE,
+      total_brier REAL DEFAULT 0,
+      count INTEGER DEFAULT 0,
+      last_updated TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
   // Create indexes for common queries
   const indexes = [
     'CREATE INDEX IF NOT EXISTS idx_fixtures_date ON fixtures(event_date)',
@@ -345,6 +440,13 @@ export async function migrate() {
     'CREATE INDEX IF NOT EXISTS idx_teams_bsd_id ON teams(bsd_id)',
     'CREATE INDEX IF NOT EXISTS idx_fixtures_bsd_id ON fixtures(bsd_id)',
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_standings_unique ON standings(league_id, season_id, team_id)',
+    'CREATE INDEX IF NOT EXISTS idx_predictions_v2_fixture ON predictions_v2(fixture_id)',
+    'CREATE INDEX IF NOT EXISTS idx_predictions_v2_tier ON predictions_v2(tier)',
+    'CREATE INDEX IF NOT EXISTS idx_predictions_v2_confidence ON predictions_v2(confidence DESC)',
+    'CREATE INDEX IF NOT EXISTS idx_team_glicko_team ON team_glicko(team_id)',
+    'CREATE INDEX IF NOT EXISTS idx_prediction_feedback_fixture ON prediction_feedback(fixture_id)',
+    'CREATE INDEX IF NOT EXISTS idx_calibration_bins_market ON calibration_bins(market_key)',
+    'CREATE INDEX IF NOT EXISTS idx_brier_scores_market ON brier_scores(market_key)',
   ];
 
   for (const sql of indexes) {

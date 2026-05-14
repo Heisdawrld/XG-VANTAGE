@@ -767,7 +767,8 @@ export async function predictUpcomingMatches(): Promise<V2Prediction[]> {
   try {
     const result = await client.execute({
       sql: `SELECT id FROM fixtures
-            WHERE match_status IN ('not_started', 'upcoming', 'notstarted')
+            WHERE status IN ('not_started', 'upcoming', 'notstarted', 'notstarted')
+              AND event_date >= date('now', '-1 day')
             ORDER BY event_date ASC`,
       args: [],
     });

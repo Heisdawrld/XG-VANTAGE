@@ -303,17 +303,15 @@ export async function GET(request: Request) {
         prediction = {
           engineVersion: 'v2',
           pickType: p.pick_type,
-          pickLabel: p.pick_label,
+          pickLabel: p.pick_type,
           confidence: p.confidence,
           tier: p.tier,
-          edge: p.edge,
           script: p.script,
-          homeXg: p.home_xg,
-          awayXg: p.away_xg,
+          homeXg: p.xg_home,
+          awayXg: p.xg_away,
           safeBet: p.safe_bet === 1,
           valueBet: p.value_bet === 1,
           dataQuality: p.data_quality,
-          enrichmentTier: p.enrichment_tier,
           tacticalMatchup: p.tactical_matchup,
           // Probability breakdown (calibrated)
           homeWinProb: calibratedProbs.homeWin ?? null,
@@ -341,9 +339,9 @@ export async function GET(request: Request) {
           probHomeWin: calibratedProbs.homeWin ?? null,
           probDraw: calibratedProbs.draw ?? null,
           probAwayWin: calibratedProbs.awayWin ?? null,
-          valueDetected: (p.edge as number) > 5,
-          valueEdge: p.edge,
-          recommendedBet: p.pick_label,
+          valueDetected: (marketSelection.bestPick?.edge ?? 0) > 5,
+          valueEdge: marketSelection.bestPick?.edge ?? 0,
+          recommendedBet: marketSelection.bestPick?.selection ?? p.pick_type,
           result: p.result,
         };
       } else {

@@ -41,6 +41,8 @@ export async function GET(request: Request) {
         const marketSelection = p.market_selection ? JSON.parse(p.market_selection as string) : {};
         const confidenceProfile = p.confidence_profile ? JSON.parse(p.confidence_profile as string) : {};
         const keyReasons = p.key_reasons ? JSON.parse(p.key_reasons as string) : [];
+        const bestPick = marketSelection.bestPick ?? null;
+        const edge = bestPick?.edge ?? 0;
 
         return {
           rank: i + 1,
@@ -58,13 +60,13 @@ export async function GET(request: Request) {
           leagueName: p.league_name as string,
           // V2 engine fields
           pickType: p.pick_type as string,
-          pickLabel: p.pick_label as string,
+          pickLabel: p.pick_type as string,
           confidence: p.confidence as number,
           tier: p.tier as string,
           script: p.script as string,
-          homeXg: p.home_xg as number,
-          awayXg: p.away_xg as number,
-          edge: p.edge as number,
+          homeXg: p.xg_home as number,
+          awayXg: p.xg_away as number,
+          edge: edge,
           safeBet: p.safe_bet === 1,
           valueBet: p.value_bet === 1,
           dataQuality: p.data_quality as string,
@@ -78,16 +80,16 @@ export async function GET(request: Request) {
           bttsYesProb: calibratedProbs.bttsYes ?? null,
           bttsNoProb: calibratedProbs.bttsNo ?? null,
           // Market selection details
-          bestPick: marketSelection.bestPick ?? null,
+          bestPick: bestPick,
           abstained: marketSelection.abstained ?? false,
           // Confidence profile
           confidenceProfile: confidenceProfile,
           // Key reasons
           keyReasons: keyReasons,
           // Value detection
-          valueDetected: (p.edge as number) > 5,
-          valueEdge: p.edge as number,
-          recommendedBet: p.pick_label as string,
+          valueDetected: edge > 5,
+          valueEdge: edge,
+          recommendedBet: bestPick?.selection ?? p.pick_type as string,
           // Odds from fixture_odds table
           odds: {
             homeWin: (p.home_win as number) ?? null,
